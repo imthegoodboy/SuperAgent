@@ -33,9 +33,8 @@ export interface PolicyInput {
  */
 export function decide(ev: PolicyInput, subscriberCount: number): { decision: Decision; reason: string } {
   if (ev.source === 'local') return { decision: 'explicit', reason: 'local chat' };
-  if (ev.source === 'worker') return { decision: 'explicit', reason: 'worker report' };
+  if (ev.source === 'worker') return ev.dropReason ? { decision: 'dropped', reason: ev.dropReason } : { decision: 'explicit', reason: 'worker report' };
   if (ev.source === 'watchdog') return { decision: 'explicit', reason: 'watchdog' };
-  if (ev.source === 'user') return { decision: 'fyi', reason: 'started directly by user' };
 
   if (ev.dropReason) return { decision: 'dropped', reason: ev.dropReason };
   if (ev.text.includes(SELF_MARKER)) return { decision: 'dropped', reason: 'posted by SuperAgent' };

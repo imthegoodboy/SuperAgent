@@ -5,15 +5,9 @@ coverage/
 .DS_Store
 Thumbs.db
 
-# Desktop build output
-desktop/node_modules/
-desktop/src-tauri/target/
-desktop/src-tauri/gen/
-
 # Local reference material (third-party article + images, not ours to redistribute)
 BasedOn.md
 /image*.png
 
 # Local scratch
 .superagent-dev/
-ui-shots/

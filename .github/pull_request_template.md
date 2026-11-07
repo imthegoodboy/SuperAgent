@@ -4,6 +4,6 @@
 
 ## Testing
 
-<!-- How you checked it: tests added, commands run, screenshots for UI changes. -->
+<!-- How you checked it: tests added, commands run, CLI output for changed commands. -->
 
 - [ ] `npm run typecheck` and `npm test` pass

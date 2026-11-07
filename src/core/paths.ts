@@ -24,10 +24,9 @@ export const paths = {
   prompts: path.join(HOME, 'prompts'),
 };
 
-/** Root of the installed package (contains dist/, ui/, skill/). */
+/** Root of the installed package (contains dist/ and skill/). */
 export const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 export const CLI_PATH = path.join(PKG_ROOT, 'dist', 'cli.js');
-export const UI_DIR = path.join(PKG_ROOT, 'ui');
 export const SKILL_DIR = path.join(PKG_ROOT, 'skill', 'superagent');
 
 export function ensureDirs(): void {

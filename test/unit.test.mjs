@@ -141,3 +141,41 @@ test('config merge and repo parsing', () => {
   assert.equal(slugFromRemote('git@github.com:a/b.git'), 'a/b');
   assert.equal(slugFromRemote('https://gitlab.com/a/b'), null);
 });
+
+test('lease length must be a finite number of minutes', () => {
+  const lease = (v) => applyConfigPatch(defaultConfig(), { router: { leaseMinutes: v } }).router.leaseMinutes;
+  assert.equal(lease(5), 5);
+  assert.equal(lease(Infinity), 15);
+  assert.equal(lease(-1), 15);
+  assert.equal(lease('soon'), 15);
+  assert.equal(lease(1e9), 1440);
+});
+
+test('silent workers that do not succeed are filtered in code', () => {
+  assert.equal(decide({ source: 'worker', kind: 'report', text: 'x', dropReason: 'silent task ended failed' }, 0).decision, 'dropped');
+  assert.equal(decide({ source: 'worker', kind: 'report', text: 'x' }, 0).decision, 'explicit');
+});
+
+test('graph renders as a tree and as mermaid', async () => {
+  const { renderGraphTree, renderGraphMermaid } = await import('../dist/router/render.js');
+  const g = {
+    router: { mode: 'attached', label: 'attached agent session (since 14:02)', busy: false },
+    workers: [
+      { id: 'W#4', agent: 'Claude Code', status: 'running', title: 'Fix "blank" screen', repo: 'web', pr: null, follows: ['TH#8'], reports_to: null },
+      { id: 'W#5', agent: 'Codex', status: 'done', title: 'CSV export', repo: null, pr: 'https://github.com/a/b/pull/9', follows: [], reports_to: 'TH#9' },
+    ],
+    threads: [
+      { id: 'TH#8', source: 'github', title: 'PR #41 (a/b)', url: null },
+      { id: 'TH#9', source: 'telegram', title: 'team chat', url: null },
+    ],
+  };
+  const tree = renderGraphTree(g);
+  assert.match(tree, /^Router: attached agent session/);
+  assert.match(tree, /├─ W#4 Claude Code · running · "Fix "blank" screen" · web\n│  └─ follows TH#8 github "PR #41 \(a\/b\)"/);
+  assert.match(tree, /└─ W#5 Codex · done · "CSV export"\n   ├─ reports to TH#9 telegram "team chat"\n   └─ PR https:\/\/github.com\/a\/b\/pull\/9/);
+  const mm = renderGraphMermaid(g);
+  assert.match(mm, /^flowchart LR/);
+  assert.match(mm, /W4\["W#4 Claude Code · running<br\/>Fix 'blank' screen"\]:::running/, 'quotes are escaped');
+  assert.match(mm, /W4 -\. follows \.-> TH8/);
+  assert.match(mm, /W5 -- reports --> TH9/);
+});

@@ -6,7 +6,7 @@ import { decide } from './policy.js';
 
 export interface IncomingEvent {
   externalId?: string;
-  source: 'local' | 'github' | 'telegram' | 'worker' | 'watchdog' | 'user';
+  source: 'local' | 'github' | 'telegram' | 'worker' | 'watchdog';
   kind: string;
   threadKey?: string;
   threadTitle?: string;

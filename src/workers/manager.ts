@@ -203,6 +203,8 @@ export class WorkerManager {
           system: workerSystem(this.app, w, ws),
           autonomy: config.workers.autonomy,
           writableDirs: ws.gitDir ? [ws.gitDir] : [],
+          // Workers see the superagent skill too; this keeps them from acting as the router.
+          env: { SUPERAGENT_WORKER: ref.W(id) },
         },
         (ev) => this.onEvent(id, run.id, ev),
         config.workers.maxRunMinutes * 60_000,
@@ -280,7 +282,7 @@ export class WorkerManager {
     if (report) {
       status = report.status === 'needs_input' ? 'waiting' : report.status;
       summary = report.summary || snippet(res.finalText, 600);
-      // Keep the question on the worker itself so the app, `tasks` and `logs` can show it.
+      // Keep the question on the worker itself so `workers`, `logs` and the router can show it.
       if (report.question) summary = `${summary}\n\n**Question:** ${report.question}`;
     } else if (res.error) {
       status = 'failed';
@@ -331,11 +333,15 @@ export class WorkerManager {
   }
 
   private report(id: number, status: string, summary: string, pr: string | null, question: string | null, error: string | null): void {
+    const w = this.app.store.workerById(id);
     this.app.ingest.ingest({
       source: 'worker',
       kind: 'report',
       text: summary || error || '(no summary)',
       meta: { worker: id, status, pr_url: pr, question, error },
+      // Acting ahead (Section 3.4): a silent task is only news if it worked. Its other results are kept
+      // on the worker and in the activity log, but no router is asked to announce them.
+      policy: w?.silent && status !== 'done' ? { dropReason: `silent task ended ${status}` } : undefined,
     });
   }
 
