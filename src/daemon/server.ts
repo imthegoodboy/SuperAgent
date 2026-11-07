@@ -8,7 +8,9 @@ import { bus, emit, parseRef, ref } from '../core/util.js';
 import { graphData, renderGraphMermaid, renderGraphTree, renderRecall } from '../router/render.js';
 import { LeaseConflict, normalizeActions } from '../router/router.js';
 import { addRepo, resolveRepoInput } from './system.js';
+import type { AddressInfo } from 'node:net';
 import { run } from '../agents/process.js';
+import { serve } from '../cli/preview.js';
 
 // The API is for the `superagent` CLI, which agents (Claude Code, Codex, …) drive. There is no web UI.
 
@@ -43,10 +45,14 @@ function id(params: string[], i = 0): number {
   return n;
 }
 
-/** Time a worker's agent has spent on its runs so far. */
-function elapsed(app: App, id: number): number {
-  return app.store.get<{ ms: number }>('SELECT COALESCE(SUM(COALESCE(ended_at, ?) - started_at), 0) AS ms FROM worker_runs WHERE worker_id = ?', Date.now(), id)?.ms ?? 0;
+/** Time each worker's agent has spent on its runs so far. */
+function elapsedByWorker(app: App): Map<number, number> {
+  const rows = app.store.all<{ worker_id: number; ms: number }>('SELECT worker_id, SUM(COALESCE(ended_at, ?) - started_at) AS ms FROM worker_runs GROUP BY worker_id', Date.now());
+  return new Map(rows.map((r) => [r.worker_id, r.ms]));
 }
+
+/** Folders `superagent serve` asked the service to serve, by folder. They live as long as the service. */
+const served = new Map<string, { server: http.Server; url: string }>();
 
 function requireWorker(app: App, n: number) {
   const w = app.store.workerById(n);
@@ -123,20 +129,61 @@ route('GET', '/api/graph', ({ app, query }) => {
   return { ...g, tree: renderGraphTree(g), mermaid: renderGraphMermaid(g) };
 });
 
-route('GET', '/api/workers', ({ app, query }) =>
-  app.store.listWorkers(query.get('archived') === 'only' ? 'archived' : query.get('archived') === '1' ? 'all' : 'current').map((w) =>
-    // Active workers carry their recent event kinds so the UI can draw activity tracks right away.
+route('GET', '/api/workers', ({ app, query }) => {
+  // ?ids=3,4: just those (any age; the list itself is capped).
+  const ids = String(query.get('ids') ?? '').split(',').map(Number).filter((n) => Number.isInteger(n) && n > 0);
+  const rows = ids.length
+    ? ids.map((n) => app.store.workerById(n)).filter((w): w is NonNullable<typeof w> => !!w)
+    : app.store.listWorkers(query.get('archived') === 'only' ? 'archived' : query.get('archived') === '1' ? 'all' : 'current');
+  const ms = elapsedByWorker(app);
+  return rows.map((w) =>
+    // Active workers carry their last step and why they wait.
     ['queued', 'running', 'waiting'].includes(w.status)
       ? {
           ...w,
-          elapsed_ms: elapsed(app, w.id),
+          elapsed_ms: ms.get(w.id) ?? 0,
           ticks: app.store.tailLogs(w.id, 48).map((l) => l.kind),
           last: app.store.tailLogs(w.id, 1)[0]?.text.split('\n')[0].slice(0, 200) ?? null,
           waiting: app.workers.queueReason(w)?.detail ?? null,
         }
-      : { ...w, elapsed_ms: elapsed(app, w.id) },
-  ),
-);
+      : { ...w, elapsed_ms: ms.get(w.id) ?? 0 },
+  );
+});
+
+// `superagent serve`: the service keeps the folder served, so the command returns at once.
+route('POST', '/api/serve', async ({ body }) => {
+  const root = path.resolve(String(body?.root ?? ''));
+  if (!body?.root || !fs.existsSync(root) || !fs.statSync(root).isDirectory()) throw new HttpError(400, `not a folder: ${root}`);
+  const page = String(body?.page ?? '').replace(/^\/+/, '');
+  const known = served.get(root);
+  if (known && (!body?.port || new URL(known.url).port === String(body.port))) return { url: known.url + page, folder: root, reused: true };
+  if (known) {
+    known.server.close();
+    served.delete(root);
+  }
+  if (served.size >= 20) throw new HttpError(400, 'already serving 20 folders; stop some with `superagent serve --stop`');
+  let server: http.Server;
+  try {
+    server = await serve(root, Number(body?.port) || 0);
+  } catch (e) {
+    throw new HttpError(400, `could not serve on port ${body?.port}: ${(e as Error).message}`);
+  }
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/`;
+  served.set(root, { server, url });
+  return { url: url + page, folder: root, reused: false };
+});
+route('GET', '/api/serve', () => [...served.entries()].map(([folder, s]) => ({ folder, url: s.url })));
+route('DELETE', '/api/serve', ({ query }) => {
+  const only = query.get('root') ? path.resolve(String(query.get('root'))) : null;
+  const stopped: string[] = [];
+  for (const [folder, s] of served) {
+    if (only && folder !== only) continue;
+    s.server.close();
+    served.delete(folder);
+    stopped.push(folder);
+  }
+  return { stopped };
+});
 route('GET', '/api/workers/:id', ({ app, params }) => {
   const w = requireWorker(app, id(params));
   return {

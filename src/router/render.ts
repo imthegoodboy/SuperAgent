@@ -183,7 +183,7 @@ export function renderAway(app: App, since: number): string {
       )
     : [];
   const acted: Record<string, number> = {};
-  for (const t of turns) for (const a of tryJson<{ type: string }[]>(t.actions ?? '[]') ?? []) acted[a.type] = (acted[a.type] ?? 0) + 1;
+  for (const t of turns) for (const a of tryJson<{ type: string }[]>(t.actions ?? '[]') ?? []) if (a.type !== 'recall') acted[a.type] = (acted[a.type] ?? 0) + 1;
   const filtered = store.get<{ n: number }>("SELECT COUNT(*) AS n FROM triggers WHERE created_at > ? AND decision = 'dropped'", since)?.n ?? 0;
   if (!msgs.length && !replies.length && !seen.length) return '';
   const count = (o: [string, number][]) => o.map(([k, n]) => `${k}${n > 1 ? ` ×${n}` : ''}`).join(', ');
@@ -224,6 +224,8 @@ export interface Graph {
   router: { mode: 'attached' | 'background'; label: string; busy: boolean };
   workers: { id: string; agent: string; status: string; title: string; repo: string | null; pr: string | null; follows: string[]; reports_to: string | null }[];
   threads: { id: string; source: string; title: string; url: string | null }[];
+  /** Workers of the last week, not just the last 3 hours (`graph --all`). */
+  all: boolean;
 }
 
 export function graphData(app: App, all = false): Graph {
@@ -261,6 +263,7 @@ export function graphData(app: App, all = false): Graph {
       : { mode: 'background', label: `background router (${st.agent}${st.model ? '/' + st.model : ''})`, busy: st.busy },
     workers: out,
     threads: [...threads.values()].map((t) => ({ id: ref.TH(t.id), source: t.source, title: t.title ?? t.key, url: t.url })),
+    all,
   };
 }
 
@@ -268,7 +271,7 @@ export function graphData(app: App, all = false): Graph {
 export function renderGraphTree(g: Graph): string {
   const titles = new Map(g.threads.map((t) => [t.id, `${t.id} ${t.source} "${snippet(t.title, 60)}"`]));
   const lines = [`Router: ${g.router.label}${g.router.busy ? ' · thinking' : ''}`];
-  if (!g.workers.length) lines.push('└─ nothing active or finished in the last 3 hours (graph --all for more)');
+  if (!g.workers.length) lines.push(g.all ? '└─ no workers in the last week' : '└─ nothing active or finished in the last 3 hours (graph --all for more)');
   g.workers.forEach((w, i) => {
     const last = i === g.workers.length - 1;
     lines.push(`${last ? '└─' : '├─'} ${w.id} ${w.agent} · ${w.status} · "${snippet(w.title, 60)}"${w.repo ? ` · ${w.repo}` : ''}`);

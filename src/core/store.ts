@@ -153,6 +153,7 @@ CREATE TABLE IF NOT EXISTS worker_runs (
 CREATE TABLE IF NOT EXISTS worker_logs (
   id INTEGER PRIMARY KEY, worker_id INTEGER NOT NULL, run_id INTEGER, ts INTEGER NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS worker_logs_worker ON worker_logs(worker_id, id);
+CREATE INDEX IF NOT EXISTS worker_runs_worker ON worker_runs(worker_id);
 CREATE TABLE IF NOT EXISTS subscriptions (
   worker_id INTEGER NOT NULL, thread_id INTEGER NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (worker_id, thread_id));
 CREATE TABLE IF NOT EXISTS inbox (
@@ -183,8 +184,8 @@ export class Store {
     // Columns added after the first release (an existing database keeps its data).
     try {
       this.db.exec('ALTER TABLE workers ADD COLUMN after_worker INTEGER');
-    } catch {
-      /* already there */
+    } catch (e) {
+      if (!/duplicate column/i.test((e as Error).message)) throw e;
     }
     this.upsertThread({ key: LOCAL_THREAD_KEY, source: 'local', title: 'Local chat', subscribable: false });
   }

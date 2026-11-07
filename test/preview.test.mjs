@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
@@ -46,13 +47,37 @@ test('serve shows the folder and nothing outside it', async () => {
     assert.match(page.headers.get('content-type'), /text\/html/);
     assert.equal((await fetch(`${base}/nested/other.html`)).status, 200);
     assert.equal((await fetch(`${base}/missing.html`)).status, 404);
-    for (const p of ['/../secret.txt', '/%2e%2e/secret.txt', '/nested/..%2f..%2fsecret.txt']) {
+    for (const p of ['/../secret.txt', '/%2e%2e/secret.txt', '/nested/..%2f..%2fsecret.txt', '/%00', '/%E0%A4%A']) {
       const r = await fetch(`${base}${p}`);
       assert.notEqual(r.status, 200, p);
       assert.doesNotMatch(await r.text(), /outside the served folder/, p);
     }
+    assert.equal((await fetch(`${base}/`)).status, 200, 'still serving after bad requests');
+    // DNS rebinding: a page on another domain that resolves to 127.0.0.1 sends its own Host header.
+    const status = await new Promise((resolve, reject) =>
+      http.get({ host: '127.0.0.1', port: server.address().port, path: '/', headers: { host: 'evil.example' } }, (res) => resolve(res.statusCode)).on('error', reject),
+    );
+    assert.equal(status, 421);
   } finally {
     server.close();
+  }
+});
+
+test('serve does not follow a symlink out of the folder', async (t) => {
+  const link = path.join(site, 'leak.txt');
+  try {
+    fs.symlinkSync(path.join(home, 'secret.txt'), link);
+  } catch {
+    return t.skip('no permission to create symlinks here');
+  }
+  const server = await serve(site, 0);
+  try {
+    const r = await fetch(`http://127.0.0.1:${server.address().port}/leak.txt`);
+    assert.equal(r.status, 403);
+    assert.doesNotMatch(await r.text(), /outside the served folder/);
+  } finally {
+    server.close();
+    fs.rmSync(link, { force: true });
   }
 });
 

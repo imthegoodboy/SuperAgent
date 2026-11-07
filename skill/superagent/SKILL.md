@@ -40,7 +40,7 @@ context was reset) or the user confirms it has ended; otherwise tell the user wh
    Handle each event (below). If none, say nothing about it. In Claude Code, a `[SuperAgent]` notice
    on your context lists events that are waiting when the user writes; handle those the same way.
    `events` hands a batch out as it prints it, so never pipe it through `head` or `tail`. A batch ends
-   with `[end of N events …]`; if you don't see that line, run `superagent events --again`.
+   with an `[end of …]` line; if you don't see one, run `superagent events --again` to print it again.
 3. **The user asks you to keep watching** (or there is nothing else to do while workers run) →
    `superagent events --wait 90` (short enough for any shell-tool timeout), handle what arrives, repeat. Stop when the user speaks.
 4. **Done for now** → `superagent router detach` (or just stop: after 15 quiet minutes the background
@@ -102,7 +102,7 @@ superagent remember "<durable fact or preference>"     # memory / forget <id>
 superagent workers · superagent result W#3 · superagent logs W#3 · superagent diff W#3 [--patch]
 superagent wait W#3 W#4 [--timeout 280]                  # block until they finish or need input
 superagent preview W#3 [page.html] [--width 375,1280] [--dark] [--full]   # screenshots + page errors
-superagent serve W#3                                      # local URL for the user to open
+superagent serve W#3                                      # local URL for the user; returns at once
 superagent merge W#3 W#4 [--into main]                    # local branches, in order; never pushes
 superagent events --again                                 # the last batch again, if output was cut off
 superagent graph · superagent status · superagent activity

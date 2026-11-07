@@ -117,7 +117,7 @@ and a run ends when its process exits even if a leftover child still holds the o
 
 A queued worker waits for one of three things, and `dispatch`, `workers` and `status` say which: a free
 slot (`workers.maxConcurrent`), enough free memory (`workers.minFreeMemoryMB`, checked only while another
-worker runs), or the worker it was dispatched `--after` (`workers.after_worker`). A dependent in the same
+worker runs), or the worker it was dispatched `--after` (a `W#n`; stored on the worker). A dependent in the same
 repo starts from its dependency's branch, and fails at once if the dependency fails or is stopped. After a
 restart, each interrupted worker's log says so; it resumes from its agent session, but the step in
 progress is redone, so `superagent restart` asks first while workers run (`--when-idle` waits).

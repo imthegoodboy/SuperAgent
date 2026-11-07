@@ -382,13 +382,17 @@ export class Router {
   pendingText(owner: string | null): string {
     this.checkOwner(owner);
     const { store } = this.app;
-    return renderEvents(this.app, store.pendingRouterTriggers(this.app.config.router.maxBatch), store.unseenFyi(), [], null);
+    const since = Number(store.getKv('router.awaySince') ?? 0);
+    const away = since ? renderAway(this.app, since) || null : null;
+    return renderEvents(this.app, store.pendingRouterTriggers(this.app.config.router.maxBatch), store.unseenFyi(), [...this.notes], away);
   }
 
   /** The last batch handed to an attached agent, again (`events --again`), for output that was cut off. */
   lastBatch(owner: string | null): string {
     this.checkOwner(owner);
-    const t = this.app.store.get<{ input: string }>("SELECT input FROM router_turns WHERE session = 'attached agent' AND batch_size > 0 ORDER BY id DESC LIMIT 1");
+    const t = this.app.store.get<{ input: string }>(
+      "SELECT input FROM router_turns WHERE session = 'attached agent' AND input != '[actions from the attached agent]' ORDER BY id DESC LIMIT 1",
+    );
     return t?.input ?? 'No batch has been handed out yet.';
   }
 
@@ -697,7 +701,13 @@ export class Router {
           if (dir && fs.existsSync(path.join(dir, '.git'))) {
             const b = String(a.base).trim();
             const has = async (r: string) => (await run('git', ['-C', dir, 'rev-parse', '--verify', '--quiet', r])).code === 0;
-            const ok = (await has(`refs/heads/${b}`)) || (await has(`refs/remotes/origin/${b.replace(/^origin\//, '')}`));
+            let ok = (await has(`refs/heads/${b}`)) || (await has(`refs/remotes/origin/${b.replace(/^origin\//, '')}`));
+            // Not fetched yet? Ask GitHub (the worker fetches before it starts). Exit code 2 means "no such branch";
+            // anything else (offline, no remote) leaves the check to the worker's own setup.
+            if (!ok && repo.slug) {
+              const r = await run('git', ['-C', dir, 'ls-remote', '--exit-code', '--heads', 'origin', b.replace(/^origin\//, '')], { timeoutMs: 20_000 });
+              ok = r.code !== 2;
+            }
             if (!ok) throw new Error(`base "${b}" is not a branch in ${repo.name}`);
           }
         }
@@ -762,7 +772,7 @@ export class Router {
         const runningFor = wasRunning ? Date.now() - (store.get<{ started_at: number }>("SELECT started_at FROM worker_runs WHERE worker_id = ? AND status = 'running' ORDER BY id DESC LIMIT 1", id)?.started_at ?? Date.now()) : 0;
         if (a.now && wasRunning && workers.restartRun(id, String(a.text), 'router')) return { worker: ref.W(id), interrupted: true, was_running: true, discarded_ms: runningFor };
         workers.message(id, 'router', String(a.text));
-        return { worker: ref.W(id), interrupted: false, was_running: wasRunning };
+        return { worker: ref.W(id), interrupted: false, was_running: wasRunning, status: store.workerById(id)?.status };
       }
       case 'stop_worker': {
         const id = parseRefOf('W', a.worker);

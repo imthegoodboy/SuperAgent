@@ -21,7 +21,7 @@ export async function ensureCheckout(repo: RepoConfig): Promise<string> {
     if (!fs.existsSync(path.join(repo.path, '.git'))) {
       throw new Error(
         `${repo.path} is not a git repository${fs.existsSync(repo.path) ? '' : ' (the folder is gone: moved or deleted?)'}. ` +
-          `Fix it with \`superagent repo add <new path> --name ${repo.name}\`, or remove it with \`superagent repo rm ${repo.name}\`.`,
+          `Fix it with \`superagent repo rm ${repo.name}\` and then \`superagent repo add <new path> --name ${repo.name}\`.`,
       );
     }
     return repo.path;

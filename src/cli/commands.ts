@@ -139,7 +139,8 @@ ${bold('Workers')}
   diff <W#3> [--patch]        What a worker changed: commits, files, uncommitted work
   preview <W#3|path> [file]   Screenshot a web page at a real device width; lists the page's errors
                                 --width 375,1280  --height 800  --full  --dark  --out shot.png
-  serve <W#3|path> [--port n] Serve a worker's folder on http://127.0.0.1 to open it in a browser
+  serve <W#3|path> [--port n] Serve a worker's folder on http://127.0.0.1 to open in a browser; returns
+                              at once (the service serves it). serve lists them, serve --stop stops them
   merge <W#3> [W#4 …]         Merge workers' branches, in order, into the repo folder's branch  [--into main]
   retry <W#3>                 Run a failed or stopped worker again
   archive <W#3>               Remove a finished worker's workspace (its branch and PR stay)
@@ -374,7 +375,10 @@ async function eventsCmd(v: Record<string, any>): Promise<void> {
   await ensureRunning();
   if (v.peek || v.again) {
     const r = await api('GET', `/api/router/events?${v.again ? 'again' : 'peek'}=1`);
-    return out(r, () => console.log(r.text));
+    return out(r, () => {
+      console.log(r.text);
+      if (v.again) console.log(dim('[end of the repeated batch]'));
+    });
   }
   const wait = Math.max(0, Math.min(280, Number(v.wait ?? 0) || 0));
   const r = await api('GET', `/api/router/events?wait=${wait}`);
@@ -576,8 +580,8 @@ async function waitFor(refs: string[], v: Record<string, any>): Promise<void> {
   const deadline = Date.now() + timeout * 1000;
   let rows: any[] = [];
   for (;;) {
-    const all: any[] = await api('GET', '/api/workers?archived=1');
-    rows = ids.map((n) => all.find((w) => w.id === n) ?? die(`No worker W#${n}`));
+    const found: any[] = await api('GET', `/api/workers?ids=${ids.join(',')}`);
+    rows = ids.map((n) => found.find((w) => w.id === n) ?? die(`No worker W#${n}`));
     if (rows.every((w) => SETTLED.includes(w.status)) || Date.now() >= deadline) break;
     await sleep(2000);
   }
@@ -625,6 +629,10 @@ async function merge(refs: string[], into: string | undefined): Promise<void> {
   const dir = repo.path;
   const git = (...a: string[]) => run('git', ['-C', dir, ...a], { timeoutMs: 120_000 });
   if ((await git('status', '--porcelain', '--untracked-files=no')).stdout.trim()) die(`${dir} has uncommitted changes; commit or stash them first.`);
+  // A merge commit needs an author; without one every merge fails, which is not a conflict.
+  if ((await git('var', 'GIT_COMMITTER_IDENT')).code !== 0) {
+    die(`git doesn't know who you are in ${dir}: run \`git config --global user.name "Your Name"\` and \`git config --global user.email you@example.com\`, then merge again.`);
+  }
   const current = (await git('rev-parse', '--abbrev-ref', 'HEAD')).stdout.trim();
   if (!into && current === 'HEAD') die(`${dir} is not on a branch (detached HEAD); name one with --into <branch>.`);
   const target = into || current;
@@ -646,6 +654,7 @@ async function merge(refs: string[], into: string | undefined): Promise<void> {
       const conflicts = (await git('diff', '--name-only', '--diff-filter=U')).stdout.trim().split('\n').filter(Boolean);
       await git('merge', '--abort');
       const before = merged.length ? `${merged.join(', ')} ${merged.length === 1 ? 'was' : 'were'} merged before it` : 'nothing was merged';
+      if (!conflicts.length) die(`git could not merge ${ids[i]} (${w.branch}) into ${target}: ${(m.stderr || m.stdout).trim().split('\n').slice(0, 4).join(' ')}. ${before[0].toUpperCase()}${before.slice(1)}.`);
       die(
         `${ids[i]} (${w.branch}) conflicts with ${target}${conflicts.length ? ` in ${conflicts.join(', ')}` : ''}: ${(m.stderr || m.stdout).trim().split('\n')[0]}. ` +
           `That merge was undone; ${before}. To resolve it, dispatch a worker: superagent dispatch "Merge branch ${w.branch} into this branch and resolve the conflicts" --repo ${repo.name} --base ${target}`,
@@ -724,27 +733,33 @@ async function previewCmd(target: string | undefined, file: string | undefined, 
 }
 
 /** `superagent serve`: a local web server for a worker's folder, for checking a result by hand. */
+/**
+ * `superagent serve`: the service serves the folder, so the command returns at once with the URL (an
+ * agent's shell would otherwise block on it). `--stop` stops one folder, or all of them.
+ */
 async function serveCmd(target: string | undefined, v: Record<string, any>): Promise<void> {
+  await ensureRunning();
+  if (v.stop) {
+    const only = target ? (await targetFolder(target, 'superagent serve --stop [W#3|path]')).root : null;
+    const r = await api('DELETE', `/api/serve${only ? `?root=${encodeURIComponent(only)}` : ''}`);
+    return out(r, () => console.log(r.stopped.length ? `${green('✓')} Stopped serving ${r.stopped.join(', ')}` : dim('Nothing was being served.')));
+  }
+  if (!target) {
+    const list: any[] = await api('GET', '/api/serve');
+    return out(list, () => (list.length ? list.forEach((s) => console.log(`${s.url}  ${dim(s.folder)}`)) : console.log(dim('Nothing is being served. Usage: superagent serve <W#3|path> [--port 8080]'))));
+  }
   const { root } = await targetFolder(target, 'superagent serve <W#3|path> [--port 8080]');
   const port = v.port === undefined ? 0 : Number(v.port);
   if (!Number.isInteger(port) || port < 0 || port > 65535) die('--port is a number from 1 to 65535');
-  const isDir = fs.statSync(root).isDirectory();
-  const base = isDir ? root : path.dirname(root);
-  let server;
-  try {
-    server = await serve(base, port);
-  } catch (e) {
-    die(`Could not serve on port ${port}: ${(e as Error).message}`);
-  }
+  const base = fs.statSync(root).isDirectory() ? root : path.dirname(root);
   let page = '';
   try {
     page = path.relative(base, pageIn(root)).split(path.sep).map(encodeURIComponent).join('/');
   } catch {
     /* no HTML file: serve the folder anyway */
   }
-  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/${page}`;
-  out({ url, folder: base }, () => console.log(`Serving ${base}\n  ${bold(url)}\n${dim('Ctrl+C to stop.')}`));
-  await new Promise(() => {});
+  const r = await api('POST', '/api/serve', { root: base, page, port });
+  out(r, () => console.log(`${r.reused ? 'Already serving' : 'Serving'} ${base}\n  ${bold(r.url)}\n${dim('The SuperAgent service keeps serving it until `superagent serve --stop` or a restart.')}`));
 }
 
 async function graph(v: Record<string, any>): Promise<void> {
@@ -1117,6 +1132,7 @@ const CLI_OPTIONS = {
       peek: { type: 'boolean' },
       again: { type: 'boolean' },
       deep: { type: 'boolean' },
+      stop: { type: 'boolean' },
       live: { type: 'boolean', short: 'f' },
       json: { type: 'boolean' },
       foreground: { type: 'boolean' },
@@ -1229,7 +1245,9 @@ export async function main(argv: string[]): Promise<void> {
                 ? `${green('✓')} Interrupted ${r.worker}: the step it was on${r.discarded_ms ? ` (running ${duration(r.discarded_ms)})` : ''} is redone, now with this message.`
                 : r.was_running
                   ? `${green('✓')} Sent to ${r.worker}. It reads it when its current run ends (--now interrupts it, and the step in progress is redone).`
-                  : `${green('✓')} ${r.worker} resumes now with this message.`,
+                  : r.status === 'queued'
+                    ? `${green('✓')} Sent to ${r.worker}, which is queued; it starts with this message when it can.`
+                    : `${green('✓')} ${r.worker} resumes now with this message.`,
             ),
         );
       case 'cancel':

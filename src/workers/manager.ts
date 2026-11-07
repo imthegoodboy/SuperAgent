@@ -44,6 +44,8 @@ export class WorkerManager {
   private active = new Map<number, ActiveRun>();
   private memoryTimer: NodeJS.Timeout | null = null;
   private memoryNoted = 0;
+  /** Branches still being copied from a worker's own clone into the repo (a dependent waits for them). */
+  private syncing = new Map<number, Promise<void>>();
 
   /** Less free memory than workers.minFreeMemoryMB (logged at most every 10 minutes). */
   private lowMemory(): boolean {
@@ -134,6 +136,8 @@ export class WorkerManager {
     }
     this.announce(w, `Stopped ${ref.W(id)}: ${reason}`, 'stopped');
     this.changed(id);
+    // A queued worker has no run to end; workers waiting --after it must hear now that it won't be done.
+    if (!a) setImmediate(() => this.schedule());
   }
 
   /** End the current run and resume it at once with a message (the watchdog's nudge, or the router redirecting it). */
@@ -186,7 +190,7 @@ export class WorkerManager {
   queueReason(w: WorkerRow): { reason: 'after' | 'slot' | 'memory'; detail: string } | null {
     if (w.status !== 'queued') return null;
     const dep = w.after_worker ? this.app.store.workerById(w.after_worker) : null;
-    if (dep && dep.status !== 'done') return { reason: 'after', detail: `waits for ${ref.W(dep.id)} (${dep.status})` };
+    if (dep && (dep.status !== 'done' || this.syncing.has(dep.id))) return { reason: 'after', detail: `waits for ${ref.W(dep.id)} (${dep.status})` };
     const max = this.app.config.workers.maxConcurrent;
     if (this.active.size >= max) return { reason: 'slot', detail: `${this.active.size}/${max} slots busy` };
     const free = Math.round(os.freemem() / 1048576);
@@ -208,7 +212,7 @@ export class WorkerManager {
         this.changed(w.id);
         return false;
       }
-      if (dep && dep.status !== 'done') return false;
+      if (dep && (dep.status !== 'done' || this.syncing.has(dep.id))) return false;
     }
     if (w.status === 'queued') return true;
     return this.app.store.undelivered(w.id).length > 0;
@@ -341,7 +345,13 @@ export class WorkerManager {
     const w = store.workerById(id)!;
     const ended = Date.now();
     // Whatever the run committed in its own clone belongs in the repo, however the run ended.
-    void syncBranch(w, this.app.findRepo(w.repo ?? undefined)).catch((e) => log(`worker ${ref.W(id)}: branch sync failed:`, (e as Error).message));
+    const sync = syncBranch(w, this.app.findRepo(w.repo ?? undefined))
+      .catch((e) => log(`worker ${ref.W(id)}: branch sync failed:`, (e as Error).message))
+      .finally(() => {
+        this.syncing.delete(id);
+        this.schedule(); // workers dispatched --after this one can start now
+      });
+    this.syncing.set(id, sync);
     if (entry.ending === 'stopped' || entry.ending === 'shutdown') {
       store.updateRun(runId, { status: entry.ending, ended_at: ended, exit_code: res.code });
       return;

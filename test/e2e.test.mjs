@@ -87,7 +87,9 @@ after(async () => {
   if (daemon && daemon.exitCode === null) {
     const exited = new Promise((r) => daemon.once('exit', r));
     daemon.kill();
-    await Promise.race([exited, new Promise((r) => setTimeout(r, 5000))]);
+    let timer;
+    await Promise.race([exited, new Promise((r) => (timer = setTimeout(r, 5000)))]);
+    clearTimeout(timer);
   }
   try {
     fs.rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
@@ -548,6 +550,9 @@ async function localRepo(name) {
   const git = (...a) => execFileSync('git', ['-C', dir, '-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { stdio: 'pipe' }).toString().trim();
   git('init', '-q', '-b', 'main');
   git('commit', '-q', '--allow-empty', '-m', 'init');
+  // `superagent merge` commits as the person; CI machines have no global git identity.
+  git('config', 'user.email', 't@t');
+  git('config', 'user.name', 't');
   const cfg = await call('GET', '/api/config');
   await call('PUT', '/api/config', { repos: [...cfg.repos, { name, path: dir, mode: 'off' }] });
   return { dir, git };
@@ -593,6 +598,13 @@ test('--after waits for another worker and builds on its branch; --verify reache
   const failed = await settled(next.worker, 'failed');
   assert.match(failed.error, new RegExp(`${broken.worker} ended failed`));
   assert.match((await act({ type: 'dispatch', task: 'x', after: broken.worker })).error, /ended failed; nothing to wait for/);
+  // Stopping a dependency that never started is news for its dependents too.
+  const busy = await act({ type: 'dispatch', task: 'SLOW: hold a slot', title: 'Holder' });
+  const waiting = await act({ type: 'dispatch', task: 'never starts', title: 'Waiting dep', after: busy.worker });
+  const last = await act({ type: 'dispatch', task: 'after the waiting one', title: 'Last', after: waiting.worker });
+  await act({ type: 'stop_worker', worker: waiting.worker });
+  assert.match((await settled(last.worker, 'failed')).error, new RegExp(`${waiting.worker} ended stopped`));
+  await act({ type: 'stop_worker', worker: busy.worker });
   assert.match((await act({ type: 'dispatch', task: 'x', after: 'W#9999' })).error, /unknown worker W#9999/);
 });
 
@@ -675,6 +687,21 @@ test('merge combines workers’ branches in order, and stops cleanly at a confli
   const scratch = await act({ type: 'dispatch', task: 'no repo here', title: 'Scratch' });
   await settled(scratch.worker);
   assert.match(sa(['merge', scratch.worker]).stderr, /scratch folder/);
+});
+
+test('serve: the service serves a folder, so the command returns at once', async () => {
+  const site = path.join(home, 'served-site');
+  fs.mkdirSync(site);
+  fs.writeFileSync(path.join(site, 'index.html'), '<h1>served</h1>');
+  const r = sa(['serve', site, '--json']);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const { url } = JSON.parse(r.stdout);
+  assert.match(url, /^http:\/\/127\.0\.0\.1:\d+\/index\.html$/);
+  assert.match(await (await fetch(url)).text(), /served/);
+  assert.equal(JSON.parse(sa(['serve', site, '--json']).stdout).url, url, 'the same folder keeps its URL');
+  assert.match(sa(['serve']).stdout, /served-site/);
+  assert.match(sa(['serve', '--stop']).stdout, /Stopped serving .*served-site/);
+  await assert.rejects(fetch(url));
 });
 
 test('restart asks before interrupting running workers', async () => {

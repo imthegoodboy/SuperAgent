@@ -154,6 +154,11 @@ async function connect(url: string) {
   let next = 0;
   const pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
   const listeners = new Map<string, ((p: any) => void)[]>();
+  // A browser that crashes or quits must not leave a command waiting forever.
+  ws.addEventListener('close', () => {
+    for (const p of pending.values()) p.reject(new Error('the browser closed the connection'));
+    pending.clear();
+  });
   ws.addEventListener('message', (ev: MessageEvent) => {
     const msg = JSON.parse(String(ev.data));
     if (msg.id && pending.has(msg.id)) {
@@ -166,10 +171,20 @@ async function connect(url: string) {
   const on = (method: string, fn: (p: any) => void) => listeners.set(method, [...(listeners.get(method) ?? []), fn]);
   return {
     on,
-    send(method: string, params: Record<string, unknown> = {}): Promise<any> {
+    send(method: string, params: Record<string, unknown> = {}, timeoutMs = 30_000): Promise<any> {
       const id = ++next;
-      ws.send(JSON.stringify({ id, method, params }));
-      return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+      return new Promise((resolve, reject) => {
+        const t = setTimeout(() => {
+          pending.delete(id);
+          reject(new Error(`the browser did not answer ${method}`));
+        }, timeoutMs);
+        const settle = (fn: (v: any) => void) => (v: any) => {
+          clearTimeout(t);
+          fn(v);
+        };
+        pending.set(id, { resolve: settle(resolve), reject: settle(reject) });
+        ws.send(JSON.stringify({ id, method, params }));
+      });
     },
     once(method: string, timeoutMs: number): Promise<void> {
       return new Promise((resolve) => {
@@ -192,22 +207,32 @@ export function serve(root: string, port: number): Promise<http.Server> {
     '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.ico': 'image/x-icon',
     '.wasm': 'application/wasm', '.txt': 'text/plain; charset=utf-8', '.woff2': 'font/woff2',
   };
-  const base = path.resolve(root);
+  const base = fs.realpathSync(path.resolve(root));
+  const inside = (p: string) => p === base || p.startsWith(base.endsWith(path.sep) ? base : base + path.sep);
   const server = http.createServer((req, res) => {
+    // Only this computer, by name: a web page whose domain resolves to 127.0.0.1 (DNS rebinding) sends its own Host.
+    const host = String(req.headers.host ?? '').replace(/:\d+$/, '').toLowerCase();
+    if (!['127.0.0.1', 'localhost', '[::1]'].includes(host)) return void res.writeHead(421).end('wrong host');
     let rel: string;
     try {
       rel = decodeURIComponent(new URL(req.url ?? '/', 'http://x').pathname);
     } catch {
       return void res.writeHead(400).end('bad path');
     }
+    if (rel.includes('\0')) return void res.writeHead(400).end('bad path');
     if (rel.endsWith('/')) rel += 'index.html';
     const file = path.resolve(base, '.' + rel);
-    if (file !== base && !file.startsWith(base + path.sep)) return void res.writeHead(403).end('forbidden');
-    fs.readFile(file, (err, data) => {
+    if (!inside(file)) return void res.writeHead(403).end('forbidden');
+    fs.realpath(file, (rerr, real) => {
       // Browsers ask for /favicon.ico by themselves; a page without one has no error.
-      if (err && rel === '/favicon.ico') return void res.writeHead(204).end();
-      if (err) return void res.writeHead(404, { 'content-type': 'text/plain' }).end('not found');
-      res.writeHead(200, { 'content-type': MIME[path.extname(file).toLowerCase()] ?? 'application/octet-stream', 'cache-control': 'no-store' }).end(data);
+      if (rerr && rel === '/favicon.ico') return void res.writeHead(204).end();
+      if (rerr) return void res.writeHead(404, { 'content-type': 'text/plain' }).end('not found');
+      // A symlink must not lead out of the folder.
+      if (!inside(real)) return void res.writeHead(403).end('forbidden');
+      fs.readFile(real, (err, data) => {
+        if (err) return void res.writeHead(404, { 'content-type': 'text/plain' }).end('not found');
+        res.writeHead(200, { 'content-type': MIME[path.extname(real).toLowerCase()] ?? 'application/octet-stream', 'cache-control': 'no-store' }).end(data);
+      });
     });
   });
   return new Promise((resolve, reject) => {
