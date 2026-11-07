@@ -23,7 +23,8 @@ fs.writeFileSync(
   JSON.stringify({
     port,
     router: { agent: 'mock', model: '' },
-    workers: { defaultAgent: 'mock', maxConcurrent: 2 },
+    // No memory guard by default: CI machines (macOS especially) report little free memory.
+    workers: { defaultAgent: 'mock', maxConcurrent: 2, minFreeMemoryMB: 0 },
     github: { enabled: false },
     watchdog: { enabled: false },
   }),
@@ -702,6 +703,23 @@ test('serve: the service serves a folder, so the command returns at once', async
   assert.match(sa(['serve']).stdout, /served-site/);
   assert.match(sa(['serve', '--stop']).stdout, /Stopped serving .*served-site/);
   await assert.rejects(fetch(url));
+});
+
+test('a worker that waits for memory says so, with the numbers', async () => {
+  await call('POST', '/api/router/attach', { take: true });
+  await call('PUT', '/api/config', { workers: { minFreeMemoryMB: 1_000_000 } });
+  try {
+    const first = await act({ type: 'dispatch', task: 'SLOW: the one that always runs', title: 'Runs anyway' });
+    assert.equal(first.status, 'running', 'one worker always runs');
+    const second = await act({ type: 'dispatch', task: 'waits', title: 'Waits for memory' });
+    assert.equal(second.status, 'queued');
+    assert.equal(second.waiting_for, 'memory');
+    assert.match(second.waiting_detail, /^\d+ MB free, needs 1000000 MB \(workers\.minFreeMemoryMB\)$/);
+    assert.match(sa(['status']).stdout, new RegExp(`${second.worker} queued: \\d+ MB free, needs 1000000 MB`));
+    for (const w of [first, second]) await act({ type: 'stop_worker', worker: w.worker });
+  } finally {
+    await call('PUT', '/api/config', { workers: { minFreeMemoryMB: 0 } });
+  }
 });
 
 test('restart asks before interrupting running workers', async () => {
