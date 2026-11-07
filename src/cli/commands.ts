@@ -116,7 +116,7 @@ ${bold('Be the router')}
   dispatch <task|->           Start a worker and return at once
                                 --agent claude|codex|opencode|cursor  --repo <name|owner/repo|.>  --title <text>
                                 --follow TH#8,TH#9  --reply TH#8  --silent
-  tell <W#3> <text|->         New instructions or information for a worker (it resumes with its memory)
+  tell <W#3> <text|-> [--now] New instructions for a worker (it resumes with its memory); --now interrupts it
   cancel <W#3> [--reason r]   Stop a worker
   reply <TH#8> <text|->       Post on a thread: a GitHub issue or PR, a Telegram chat
   ignore <T#41> [T#42 …]      Mark events as needing nothing  [--reason r]
@@ -749,6 +749,7 @@ export async function main(argv: string[]): Promise<void> {
       reason: { type: 'string' },
       wait: { type: 'string' },
       take: { type: 'boolean' },
+      now: { type: 'boolean' },
       mermaid: { type: 'boolean' },
       patch: { type: 'boolean' },
       mode: { type: 'string' },
@@ -832,8 +833,14 @@ export async function main(argv: string[]): Promise<void> {
         );
       }
       case 'tell':
-        return act({ type: 'message_worker', worker: workerRef(rest[0]), text: await textArg(rest.slice(1), 'superagent tell <W#3> "<text>"') }, (r) =>
-          console.log(`${green('✓')} Sent to ${r.worker}. It resumes with this message.`),
+        return act(
+          { type: 'message_worker', worker: workerRef(rest[0]), text: await textArg(rest.slice(1), 'superagent tell <W#3> "<text>" [--now]'), now: !!v.now },
+          (r) =>
+            console.log(
+              r.interrupted
+                ? `${green('✓')} Interrupted ${r.worker}; it resumes right away with this message.`
+                : `${green('✓')} Sent to ${r.worker}. It reads it when its current run ends (add --now to interrupt).`,
+            ),
         );
       case 'cancel':
         return act({ type: 'stop_worker', worker: workerRef(rest[0]), reason: v.reason ?? 'stopped by the router' }, (r) => console.log(`${green('✓')} Stopped ${r.worker}`));

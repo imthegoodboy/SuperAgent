@@ -12,6 +12,8 @@ interface ActiveRun {
   kill: () => void;
   /** Why the run is being ended early, if it is. */
   ending: null | 'stopped' | 'restart' | 'shutdown';
+  /** Who restarted it: the watchdog, or the router redirecting it. */
+  restartBy?: string;
 }
 
 export interface CreateWorker {
@@ -109,12 +111,15 @@ export class WorkerManager {
     this.changed(id);
   }
 
-  /** Watchdog: end the current run and resume it with a nudge in the inbox. */
-  restartRun(id: number, note: string): boolean {
+  /** End the current run and resume it at once with a message (the watchdog's nudge, or the router redirecting it). */
+  restartRun(id: number, note: string, sender = 'watchdog'): boolean {
     const a = this.active.get(id);
     if (!a || !a.runId) return false;
-    this.app.store.addInbox(id, 'watchdog', note);
+    this.app.store.addInbox(id, sender, note);
+    this.app.store.addLog(id, a.runId, 'inbox', `(${sender}, now) ${note}`);
+    emit('worker_log', this.app.store.tailLogs(id, 1)[0]);
     a.ending = 'restart';
+    a.restartBy = sender;
     a.kill();
     return true;
   }
@@ -260,7 +265,7 @@ export class WorkerManager {
     if (entry.ending === 'restart') {
       store.updateRun(runId, { status: 'restarted', ended_at: ended, exit_code: res.code });
       store.updateWorker(id, { status: 'queued', pid: null });
-      store.addLog(id, runId, 'system', 'Run restarted by the watchdog');
+      store.addLog(id, runId, 'system', `Run restarted by ${entry.restartBy === 'watchdog' || !entry.restartBy ? 'the watchdog' : `the ${entry.restartBy}`}`);
       this.changed(id);
       return;
     }

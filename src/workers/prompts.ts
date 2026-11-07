@@ -32,7 +32,7 @@ export function workerSystem(app: App, w: WorkerRow, ws: Workspace): string {
     `- Work only inside your workspace: ${ws.cwd}`,
   ];
   if (ws.branch) {
-    lines.push(`- You are on git branch \`${ws.branch}\` (created from \`${ws.base}\`). Commit your changes to this branch with clear messages.`);
+    lines.push(`- You are on git branch \`${ws.branch}\` (created from \`${ws.base}\`). Commit your changes to this branch with clear messages. Commit only files that belong to the task: never caches, temporary folders or tool state (stage paths explicitly rather than \`git add -A\`).`);
     if (repo?.slug && app.config.workers.allowDraftPRs) {
       lines.push(
         `- When the work is complete and verified, push your branch (\`git push -u origin ${ws.branch}\`) and open a DRAFT pull request against \`${defaultBranch}\` with \`gh pr create --draft\`. Write a complete PR description (problem, change, how it was verified) and end the body with the line \`<!-- superagent:${ref.W(w.id)} -->\`. If a PR for your branch already exists, just push to it.`,
@@ -45,7 +45,8 @@ export function workerSystem(app: App, w: WorkerRow, ws: Workspace): string {
   lines.push(
     '- Do not comment on GitHub issues or PRs or message people yourself. The Router does all communication; put what people need to know in your report.',
     '- You are a worker, not the router: do not use the superagent skill or start other SuperAgent workers.',
-    '- Verify your work with the project\'s build, tests or linters when they exist.',
+    '- Verify your work with the project\'s build, tests or linters when they exist. Keep checks in proportion to the task: for a small script or page, a syntax check or a quick run of its logic is enough; launch browsers, servers or long test suites only when the task needs them.',
+    '- If a tool or check cannot run in your environment (a sandbox, a missing program, no display or GPU), do not retry it in a loop: use a lighter check, and say in your report what you could not verify.',
     '- If you are blocked or need a human decision, stop and ask through the report (status "needs_input").',
     '',
     'Finish EVERY run with exactly one report block as the very last thing in your final message:',

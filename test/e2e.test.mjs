@@ -280,6 +280,24 @@ test('`tell` resumes a finished worker with its memory (pass-through inbox)', as
   assert.match(detail.runs[1].prompt, /one more thing/);
 });
 
+test('`tell --now` interrupts a running worker and resumes it with the message', async () => {
+  await call('POST', '/api/router/attach', { take: true });
+  const d = await act({ type: 'dispatch', task: 'SLOW: a long job', title: 'Long job' });
+  const id = d.worker.slice(2);
+  await until(async () => (await call('GET', `/api/workers/${id}`)).logs.some((l) => l.kind === 'tool'));
+  const r = await act({ type: 'message_worker', worker: d.worker, text: 'change of plan: wrap up now', now: true });
+  assert.equal(r.interrupted, true);
+  const detail = await until(async () => {
+    const x = await call('GET', `/api/workers/${id}`);
+    return x.runs.length === 2 && x.worker.status === 'done' ? x : null;
+  });
+  assert.equal(detail.runs[0].status, 'restarted');
+  assert.match(detail.runs[1].prompt, /change of plan: wrap up now/);
+  assert.ok(detail.logs.some((l) => l.text === 'Run restarted by the router'));
+  const later = await act({ type: 'message_worker', worker: d.worker, text: 'one more detail', now: true });
+  assert.equal(later.interrupted, false, 'nothing to interrupt: it is simply queued');
+});
+
 test('the CLI drives the router: attach, dispatch, events, graph, recall', async () => {
   const attach = sa(['router', 'attach', '--take']);
   assert.equal(attach.status, 0, attach.stderr);
