@@ -13,6 +13,8 @@ export interface Workspace {
   gitDir: string | null;
 }
 
+const cloning = new Map<string, Promise<void>>();
+
 /** Local checkout for a configured repo, cloning it on first use when only owner/repo is known. */
 export async function ensureCheckout(repo: RepoConfig): Promise<string> {
   if (repo.path) {
@@ -22,8 +24,15 @@ export async function ensureCheckout(repo: RepoConfig): Promise<string> {
   if (!repo.slug) throw new Error(`repo ${repo.name} has neither a path nor a GitHub slug`);
   const dest = path.join(paths.repos, ...repo.slug.split('/'));
   if (!fs.existsSync(path.join(dest, '.git'))) {
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    await runOk('gh', ['repo', 'clone', repo.slug, dest], { timeoutMs: 10 * 60_000 });
+    // Two workers dispatched at once to a repo that isn't cloned yet share one clone.
+    let pending = cloning.get(dest);
+    if (!pending) {
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      pending = runOk('gh', ['repo', 'clone', repo.slug, dest], { timeoutMs: 10 * 60_000 }).then(() => undefined);
+      cloning.set(dest, pending);
+      pending.finally(() => cloning.delete(dest)).catch(() => {});
+    }
+    await pending;
   }
   return dest;
 }
@@ -62,6 +71,16 @@ export async function prepareWorkspace(w: WorkerRow, repo: RepoConfig | undefine
     }
   }
   if (!base) base = (await git(checkout, ['rev-parse', '--abbrev-ref', 'HEAD'])) || 'HEAD';
+  // A base the router asked for (dispatch --base): a branch of the person's own, for example.
+  if (w.base) {
+    const wanted = w.base;
+    // A branch, local or on origin: the worker's PR goes against it, and a PR needs a branch.
+    const ok = async (ref: string) => (await run('git', ['-C', checkout, 'rev-parse', '--verify', '--quiet', ref])).code === 0;
+    if (wanted.startsWith('origin/') && (await ok(`refs/remotes/${wanted}`))) base = wanted;
+    else if (await ok(`refs/heads/${wanted}`)) base = wanted;
+    else if (hasOrigin && (await ok(`refs/remotes/origin/${wanted}`))) base = `origin/${wanted}`;
+    else throw new Error(`base "${wanted}" is not a branch in ${repo.name}`);
+  }
 
   const branch = `superagent/w${w.id}-${slugify(w.title, 32)}`;
   const cwd = path.join(paths.worktrees, `${slugify(repo.name, 24)}-w${w.id}`);

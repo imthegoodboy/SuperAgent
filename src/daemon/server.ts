@@ -1,11 +1,14 @@
+import fs from 'node:fs';
 import http from 'node:http';
+import path from 'node:path';
 import type { App } from './app.js';
 import { publicConfig } from '../core/config.js';
-import { HOME_ID, pkgVersion } from '../core/paths.js';
-import { bus, emit, ref } from '../core/util.js';
+import { HOME_ID, paths, pkgVersion } from '../core/paths.js';
+import { bus, emit, parseRef, ref } from '../core/util.js';
 import { graphData, renderGraphMermaid, renderGraphTree, renderRecall } from '../router/render.js';
 import { LeaseConflict, normalizeActions } from '../router/router.js';
 import { addRepo, resolveRepoInput } from './system.js';
+import { run } from '../agents/process.js';
 
 // The API is for the `superagent` CLI, which agents (Claude Code, Codex, …) drive. There is no web UI.
 
@@ -57,6 +60,15 @@ route('GET', '/api/state', ({ app }) => app.state());
 
 /** The calling agent session's identity, when its harness exposes one (sent by the CLI). */
 const sessionOf = (req: http.IncomingMessage): string | null => String(req.headers['x-superagent-session'] ?? '').slice(0, 200) || null;
+/** Where the calling session runs, shown to anyone the lease turns away. */
+const whoOf = (req: http.IncomingMessage): string | null => {
+  const raw = String(req.headers['x-superagent-client'] ?? '');
+  try {
+    return decodeURIComponent(raw).replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 300) || null;
+  } catch {
+    return null;
+  }
+};
 
 /** Router commands from a session that does not hold the lease get 409 with the reason. */
 async function asRouter<T>(fn: () => T | Promise<T>): Promise<T> {
@@ -68,7 +80,7 @@ async function asRouter<T>(fn: () => T | Promise<T>): Promise<T> {
   }
 }
 
-route('POST', '/api/router/attach', ({ app, body, req }) => asRouter(() => app.router.attach(!!body?.take, sessionOf(req))));
+route('POST', '/api/router/attach', ({ app, body, req }) => asRouter(() => app.router.attach(!!body?.take, sessionOf(req), whoOf(req))));
 route('POST', '/api/router/detach', ({ app, req }) =>
   asRouter(() => {
     app.router.detach(sessionOf(req));
@@ -78,20 +90,26 @@ route('POST', '/api/router/detach', ({ app, req }) =>
 route('GET', '/api/router/events', ({ app, query, signal, req }) => {
   // fetch() gives up on a response after 300 s, so long polls stay below that.
   const wait = Math.min(280, Math.max(0, Number(query.get('wait')) || 0));
-  return asRouter(() => app.router.events(wait * 1000, signal, sessionOf(req)));
+  return asRouter(() => app.router.events(wait * 1000, signal, sessionOf(req), whoOf(req)));
 });
 route('POST', '/api/router/actions', ({ app, body, req }) => {
   const raw = Array.isArray(body?.actions) ? body.actions : body ? [body] : [];
   const actions = normalizeActions(raw);
   if (actions.length !== raw.length) throw new HttpError(400, `unknown action type in ${JSON.stringify(raw.map((a: any) => a?.type))}`);
   if (!actions.length) throw new HttpError(400, 'no actions');
-  return asRouter(() => app.router.act(actions, sessionOf(req)));
+  return asRouter(() => app.router.act(actions, sessionOf(req), whoOf(req)));
 });
 route('GET', '/api/router/peek', ({ app, req }) => app.router.peek(sessionOf(req)));
 route('GET', '/api/recall', ({ app, query }) => {
   const ids = String(query.get('ids') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
   if (!ids.length) throw new HttpError(400, 'ids is required, e.g. ids=W#3,TH#8');
-  return { text: renderRecall(app, ids) };
+  const text = renderRecall(app, ids);
+  const missing = ids.filter((id) => {
+    const r = parseRef(id);
+    if (!r) return true;
+    return !(r.kind === 'T' ? app.store.triggerById(r.id) : r.kind === 'TH' ? app.store.threadById(r.id) : app.store.workerById(r.id));
+  });
+  return { text, missing };
 });
 route('GET', '/api/graph', ({ app }) => {
   const g = graphData(app);
@@ -141,6 +159,17 @@ route('POST', '/api/workers/:id/retry', ({ app, params }) => {
   }
   return { ok: true };
 });
+route('POST', '/api/workers/cleanup', async ({ app, body }) => {
+  const days = Number(body?.days ?? 7);
+  if (!Number.isFinite(days) || days < 0) throw new HttpError(400, 'days must be 0 or more');
+  const archived = await app.workers.cleanup(days);
+  // Worktrees whose folders are gone (deleted by hand, say) are forgotten by git too.
+  for (const repo of app.config.repos) {
+    const dir = repo.path ?? (repo.slug ? path.join(paths.repos, ...repo.slug.split('/')) : null);
+    if (dir && fs.existsSync(path.join(dir, '.git'))) await run('git', ['-C', dir, 'worktree', 'prune']); // never clone just to prune
+  }
+  return { archived: archived.map((id) => ref.W(id)) };
+});
 route('POST', '/api/workers/:id/archive', async ({ app, params }) => {
   await app.workers.archive(requireWorker(app, id(params)).id);
   return { ok: true };
@@ -160,7 +189,13 @@ route('POST', '/api/router/reset', ({ app }) => {
 });
 
 route('GET', '/api/config', ({ app }) => publicConfig(app.config));
-route('PUT', '/api/config', ({ app, body }) => publicConfig(app.updateConfig(body ?? {})));
+route('PUT', '/api/config', ({ app, body }) => {
+  try {
+    return publicConfig(app.updateConfig(body ?? {}));
+  } catch (e) {
+    throw new HttpError(400, (e as Error).message);
+  }
+});
 
 route('POST', '/api/repos', async ({ app, body }) => {
   try {
@@ -307,7 +342,7 @@ function sse(app: App, req: http.IncomingMessage, res: http.ServerResponse): voi
 
 export function createServer(app: App): http.Server {
   return http.createServer(async (req, res) => {
-    const port = app.config.port;
+    const port = app.listenPort || app.config.port;
     const host = String(req.headers.host ?? '');
     // DNS-rebinding guard: only answer to our own loopback names.
     if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) return send(res, 421, 'misdirected request');

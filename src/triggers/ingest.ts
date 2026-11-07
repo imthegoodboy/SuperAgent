@@ -26,6 +26,7 @@ export interface IncomingEvent {
     ciConclusion?: string | null;
     informational?: boolean;
     dropReason?: string;
+    reviewBot?: boolean;
   };
 }
 
@@ -67,6 +68,7 @@ export class Ingest {
         ciConclusion: p.ciConclusion,
         informational: p.informational,
         dropReason: p.dropReason,
+        reviewBot: p.reviewBot,
       },
       subscribers.length,
     );

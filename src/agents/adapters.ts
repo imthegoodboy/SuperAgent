@@ -10,7 +10,9 @@ export type AgentEvent =
   | { kind: 'tool'; text: string }
   | { kind: 'output'; text: string }
   | { kind: 'error'; text: string }
-  | { kind: 'final'; text: string };
+  | { kind: 'final'; text: string }
+  /** The process printed something (parsed or not): it is alive. */
+  | { kind: 'ping' };
 
 export interface RunSpec {
   cwd: string;
@@ -52,6 +54,8 @@ export interface AgentAdapter {
    * main repo's .git) can't commit. Such workers get a self-contained clone instead.
    */
   needsOwnGitDir?(autonomy: 'full' | 'safe'): boolean;
+  /** How to tell whether the CLI is signed in: true, false, or null when its output doesn't say. */
+  auth?: { args: string[]; signedIn(output: string): boolean | null; login: string };
 }
 
 function toolSummary(name: string, input: any): string {
@@ -102,6 +106,11 @@ function claudeParser(): (line: string) => AgentEvent[] {
 export const claude: AgentAdapter = {
   id: 'claude',
   label: 'Claude Code',
+  auth: {
+    args: ['auth', 'status'],
+    signedIn: (out) => (/"loggedIn":\s*true/.test(out) ? true : /"loggedIn":\s*false/.test(out) ? false : null),
+    login: 'claude auth login',
+  },
   command: 'claude',
   promptVia: 'stdin',
   supportsSystem: true,
@@ -133,6 +142,11 @@ export const claude: AgentAdapter = {
 export const codex: AgentAdapter = {
   id: 'codex',
   label: 'Codex',
+  auth: {
+    args: ['login', 'status'],
+    signedIn: (out) => (/not logged in/i.test(out) ? false : /logged in/i.test(out) ? true : null),
+    login: 'codex login',
+  },
   command: 'codex',
   promptVia: 'stdin',
   supportsSystem: false,
@@ -264,6 +278,11 @@ function cursorToolSummary(tc: any): string {
 export const cursor: AgentAdapter = {
   id: 'cursor',
   label: 'Cursor Agent',
+  auth: {
+    args: ['status'],
+    signedIn: (out) => (/not logged in|authentication required|login required/i.test(out) ? false : /logged in/i.test(out) ? true : null),
+    login: 'cursor-agent login',
+  },
   command: 'cursor-agent',
   promptVia: 'arg',
   supportsSystem: false,

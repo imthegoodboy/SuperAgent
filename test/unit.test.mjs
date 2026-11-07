@@ -145,10 +145,8 @@ test('config merge and repo parsing', () => {
 test('lease length must be a finite number of minutes', () => {
   const lease = (v) => applyConfigPatch(defaultConfig(), { router: { leaseMinutes: v } }).router.leaseMinutes;
   assert.equal(lease(5), 5);
-  assert.equal(lease(Infinity), 15);
-  assert.equal(lease(-1), 15);
-  assert.equal(lease('soon'), 15);
-  assert.equal(lease(1e9), 1440);
+  assert.equal(lease(0.5), 0.5);
+  for (const bad of [Infinity, -1, 0, 'soon', 1e9]) assert.throws(() => lease(bad), /router.leaseMinutes must be a number from 0.01 to 1440/);
 });
 
 test('silent workers that do not succeed are filtered in code', () => {

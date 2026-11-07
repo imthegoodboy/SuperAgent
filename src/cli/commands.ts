@@ -5,8 +5,8 @@ import { parseArgs } from 'node:util';
 import { AGENT_IDS, applyConfigPatch, loadConfig, publicConfig, saveConfig, type SourceMode } from '../core/config.js';
 import { CLI_PATH, ensureDirs, paths, pkgVersion } from '../core/paths.js';
 import { ago, duration, sleep } from '../core/util.js';
-import { isAlive, killTree, resolveCommand, run, runInteractive } from '../agents/process.js';
-import { detectAgents } from '../agents/runner.js';
+import { commandLine, isAlive, killTree, resolveCommand, run, runInteractive } from '../agents/process.js';
+import { checkSignIn, detectAgents } from '../agents/runner.js';
 import {
   autostartStatus,
   chooseAutostart,
@@ -115,7 +115,7 @@ ${bold('Be the router')}
   events [--wait <seconds>]   New events that need a decision (waits up to 280 s for one with --wait)
   dispatch <task|->           Start a worker and return at once
                                 --agent claude|codex|opencode|cursor  --repo <name|owner/repo|.>  --title <text>
-                                --follow TH#8,TH#9  --reply TH#8  --silent
+                                --follow TH#8,TH#9  --reply TH#8  --base <branch>  --silent
   tell <W#3> <text|-> [--now] New instructions for a worker (it resumes with its memory); --now interrupts it
   cancel <W#3> [--reason r]   Stop a worker
   reply <TH#8> <text|->       Post on a thread: a GitHub issue or PR, a Telegram chat
@@ -130,6 +130,7 @@ ${bold('Workers')}
   diff <W#3> [--patch]        What a worker changed: commits, files, uncommitted work
   retry <W#3>                 Run a failed or stopped worker again
   archive <W#3>               Remove a finished worker's workspace (its branch and PR stay)
+  cleanup [--days 7]          Archive every worker that finished more than N days ago
   graph [--mermaid]           Router → workers → threads they follow
 
 ${bold('Service and setup')}
@@ -142,7 +143,8 @@ ${bold('Service and setup')}
   install | uninstall         Add or remove the skill for every coding agent on this computer
   autostart on|off
 
-Text arguments given as "-" are read from stdin. Every command accepts --json.
+Quote text arguments. Text given as "-" is read from stdin; anything after -- is text, not options.
+Every command accepts --json.
 ${dim('Data lives in ' + paths.home)}`;
 
 // ---------- service lifecycle ----------
@@ -210,7 +212,8 @@ async function stop(quiet = false): Promise<void> {
   for (let i = 0; i < 20 && (await health(500)); i++) await sleep(500);
   const wd = watchdogPid();
   for (let i = 0; i < 10 && isAlive(wd); i++) await sleep(500);
-  if (isAlive(wd)) killTree(wd);
+  // After a reboot the pid file can name an unrelated program: only end it if it is our watchdog.
+  if (wd && isAlive(wd) && (await commandLine(wd)).includes('__watchdog')) killTree(wd);
   if (quiet) return;
   out({ ok: true, running: false }, () => console.log(h ? `${dim('●')} SuperAgent stopped` : dim('SuperAgent was not running')));
 }
@@ -531,11 +534,14 @@ async function repo(sub: string | undefined, rest: string[], v: Record<string, a
 async function agents(): Promise<void> {
   const rows: any[] = (await health()) ? await api('POST', '/api/agents/refresh') : await detectAgents();
   const cfg = loadConfig();
-  out(rows, () => {
-    for (const a of rows) {
+  const signIns = await Promise.all(rows.map((a) => (a.installed ? checkSignIn(a.id) : Promise.resolve(null))));
+  out(rows.map((a, i) => ({ ...a, signedIn: signIns[i]?.signedIn ?? null })), () => {
+    for (const [i, a] of rows.entries()) {
+      const s = signIns[i];
+      const auth = s?.signedIn === false ? red(` · not signed in (\`${s.login}\`)`) : s?.signedIn ? dim(' · signed in') : '';
       const def = a.id === cfg.workers.defaultAgent ? dim(' (default worker)') : '';
       const router = a.id === cfg.router.agent ? dim(' (background router)') : '';
-      console.log(`${a.installed ? green('✓') : red('✗')} ${bold(fit(a.label, 13))} ${a.installed ? a.version : dim(a.error ?? 'not found')}${def}${router}`);
+      console.log(`${a.installed && s?.signedIn !== false ? green('✓') : red('✗')} ${bold(fit(a.label, 13))} ${a.installed ? a.version : dim(a.error ?? 'not found')}${auth}${def}${router}`);
     }
   });
 }
@@ -571,9 +577,12 @@ async function config(sub: string | undefined, rest: string[]): Promise<void> {
       /* plain string */
     }
     const patch = patchFor(key, value);
-    if (await health()) await api('PUT', '/api/config', patch);
+    const running = !!(await health());
+    if (running) await api('PUT', '/api/config', patch);
     else saveConfig(applyConfigPatch(loadConfig(), patch));
-    return out({ ok: true, key, value }, () => console.log(`${green('✓')} ${key} = ${JSON.stringify(value)}`));
+    const applied = getPath(publicConfig(loadConfig()), key);
+    const later = running && key === 'port' ? ' (the running service keeps its port until `superagent restart`)' : '';
+    return out({ ok: true, key, value: applied, ...(later ? { restart: true } : {}) }, () => console.log(`${green('✓')} ${key} = ${JSON.stringify(applied)}${dim(later)}`));
   }
   die('Usage: superagent config [get <key> | set <key> <value>]');
 }
@@ -607,10 +616,13 @@ async function doctor(): Promise<void> {
   if (gh.code === 0) ok(`GitHub CLI logged in ${(gh.stdout + gh.stderr).match(/account (\S+)/)?.[1] ?? ''}`.trim());
   else warn('GitHub CLI not logged in', 'run `gh auth login` to enable GitHub triggers and PRs');
   const found = await detectAgents();
-  for (const a of found) {
-    if (a.installed) ok(`${a.label} ${a.version}`);
-    else warn(`${a.label} not available`, a.error ?? '');
-  }
+  const signIns = await Promise.all(found.map((a) => (a.installed ? checkSignIn(a.id) : Promise.resolve(null))));
+  found.forEach((a, i) => {
+    const s = signIns[i];
+    if (!a.installed) warn(`${a.label} not available`, a.error ?? '');
+    else if (s?.signedIn === false) warn(`${a.label} ${a.version} is installed but not signed in`, `run \`${s.login}\`; its workers fail until then`);
+    else ok(`${a.label} ${a.version}${s?.signedIn ? ', signed in' : ''}`);
+  });
   if (!found.some((a) => a.installed)) bad('No coding agent installed', `install one of: ${AGENT_IDS.join(', ')}`);
   const skill = integrationStatus();
   if (!asJson) {
@@ -626,7 +638,8 @@ async function doctor(): Promise<void> {
     if (r.path && !fs.existsSync(r.path)) bad(`Repo ${r.name}: ${r.path} does not exist`);
     else ok(`Repo ${r.name}${r.slug ? ` (${r.slug}, GitHub events: ${r.mode})` : ''}`);
   }
-  if (await autostartStatus()) ok('Starts automatically at login');
+  if (process.env.SUPERAGENT_HOME) ok(`Custom data folder (${paths.home}): it doesn't start at login by itself`);
+  else if (await autostartStatus()) ok('Starts automatically at login');
   else warn('Not starting at login', 'superagent autostart on');
   if (asJson) console.log(JSON.stringify({ ok: !checks.some((c) => c.level === 'bad'), checks, skill }, null, 2));
 }
@@ -734,12 +747,23 @@ async function uninstall(): Promise<void> {
 
 // ---------- entry ----------
 
-export async function main(argv: string[]): Promise<void> {
-  const { values: v, positionals } = parseArgs({
-    args: argv,
+/** Parse the command line. Unknown options are errors (a typo must not be ignored silently). */
+function parseCli(argv: string[]) {
+  // A quoted argument with spaces is text even when it starts with "-" ("--json output is nice").
+  const text: string[] = [];
+  const args = argv.map((a) => (a.startsWith('-') && /\s/.test(a) ? `\u0000${text.push(a) - 1}` : a));
+  const parsed = parseArgs({
+    args,
     allowPositionals: true,
-    strict: false,
-    options: {
+    strict: true,
+    options: CLI_OPTIONS,
+  });
+  const restore = (p: unknown) => (typeof p === 'string' && p.startsWith('\u0000') ? text[Number(p.slice(1))] : p);
+  const values = Object.fromEntries(Object.entries(parsed.values).map(([k, val]) => [k, restore(val)]));
+  return { values: values as Record<string, any>, positionals: parsed.positionals.map((p) => restore(p) as string) };
+}
+
+const CLI_OPTIONS = {
       agent: { type: 'string' },
       repo: { type: 'string' },
       title: { type: 'string' },
@@ -750,6 +774,8 @@ export async function main(argv: string[]): Promise<void> {
       wait: { type: 'string' },
       take: { type: 'boolean' },
       now: { type: 'boolean' },
+      base: { type: 'string' },
+      days: { type: 'string' },
       mermaid: { type: 'boolean' },
       patch: { type: 'boolean' },
       mode: { type: 'string' },
@@ -761,8 +787,23 @@ export async function main(argv: string[]): Promise<void> {
       foreground: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
-    },
-  });
+} as const;
+
+export async function main(argv: string[]): Promise<void> {
+  let v: Record<string, any>;
+  let positionals: string[];
+  try {
+    ({ values: v, positionals } = parseCli(argv));
+  } catch (e) {
+    asJson = argv.includes('--json');
+    const msg = (e as Error).message.replace(/\. To specify a positional argument.*$/s, '');
+    try {
+      die(`${msg}. Quote text that contains options, or put it after --. See \`superagent help\`.`);
+    } catch {
+      process.exitCode = 1;
+      return;
+    }
+  }
   asJson = !!v.json;
   const [cmd, ...rest] = positionals;
   if (v.version || cmd === 'version') return out({ version: pkgVersion() }, () => console.log(pkgVersion()));
@@ -823,9 +864,12 @@ export async function main(argv: string[]): Promise<void> {
             threads: list(v.follow).map(threadRef),
             reply_thread: v.reply ? threadRef(String(v.reply)) : undefined,
             silent: !!v.silent,
+            base: v.base,
           },
           (r) => {
-            console.log(`${green('▶')} Started ${bold(r.worker)} ${dim(`(${r.agent})`)} ${r.title}${r.repo ? dim(` · repo ${r.repo}`) : dim(' · scratch folder')}`);
+            const place = r.repo ? dim(` · repo ${r.repo}`) : dim(' · scratch folder');
+            if (r.status === 'queued') console.log(`${yellow('⏸')} Queued ${bold(r.worker)} ${dim(`(${r.agent})`)} ${r.title}${place} ${dim(`(${r.running}/${r.max} slots busy; it starts when one frees up)`)}`);
+            else console.log(`${green('▶')} Started ${bold(r.worker)} ${dim(`(${r.agent})`)} ${r.title}${place}`);
             if (r.follows.length) console.log(dim(`  follows ${r.follows.join(', ')}: new events there go straight to it`));
             const where = r.reports_to_user ? '' : ` (its reply thread is ${r.reply_thread})`;
             console.log(dim(`  Its result arrives in \`superagent events\`${where}${r.silent ? '; silent: only if it succeeds' : ''}. Keep going meanwhile.`));
@@ -877,7 +921,12 @@ export async function main(argv: string[]): Promise<void> {
         if (!rest.length) die('Usage: superagent recall <T#42|TH#8|W#3> […]');
         await ensureRunning();
         const r = await api('GET', `/api/recall?ids=${encodeURIComponent(rest.join(','))}`);
-        return out(r, () => console.log(r.text));
+        out(r, () => console.log(r.text));
+        if (r.missing?.length) {
+          if (!asJson) console.error(red(`✗ Not found: ${r.missing.join(', ')} (use T#n, TH#n or W#n)`));
+          process.exitCode = 1;
+        }
+        return;
       }
 
       // ---- workers ----
@@ -900,6 +949,13 @@ export async function main(argv: string[]): Promise<void> {
       }
       case 'graph':
         return graph(v);
+      case 'cleanup': {
+        await ensureRunning();
+        const days = v.days === undefined ? 7 : Number(v.days);
+        if (!Number.isFinite(days) || days < 0) die('Usage: superagent cleanup [--days N] (N is 0 or more)');
+        const r = await api('POST', '/api/workers/cleanup', { days });
+        return out(r, () => console.log(r.archived.length ? `${green('✓')} Archived ${r.archived.join(', ')} (finished more than ${days} days ago; branches and PRs stay)` : dim(`Nothing to clean up: no finished worker is older than ${days} days.`)));
+      }
       case 'diff':
         return diff(rest[0], !!v.patch);
       case 'activity':

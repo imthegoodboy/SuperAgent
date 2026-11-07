@@ -11,10 +11,27 @@ function isBot(user: any): boolean {
   return user?.type === 'Bot' || /\[bot\]$/.test(user?.login ?? '');
 }
 
-async function ghJson(pathAndQuery: string): Promise<any> {
-  const r = await run('gh', ['api', '-H', 'Accept: application/vnd.github+json', pathAndQuery], { timeoutMs: 60_000 });
+/** Every page of a list endpoint (after a weekend asleep, or in a busy repo, page 1 is not enough). */
+async function ghPages(pathAndQuery: string): Promise<any[]> {
+  // Every page in one JSON array; keep all of it (the default 256 KB tail would cut it).
+  const r = await run('gh', ['api', '--paginate', '--slurp', '-H', 'Accept: application/vnd.github+json', pathAndQuery], {
+    timeoutMs: 3 * 60_000,
+    keepBytes: 64 * 1024 * 1024,
+  });
   if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().slice(0, 300) || `gh api ${pathAndQuery} failed`);
-  return tryJson(r.stdout);
+  const pages = tryJson<any[]>(r.stdout);
+  if (!Array.isArray(pages)) throw new Error(`gh api ${pathAndQuery}: unexpected output`);
+  return pages;
+}
+
+async function ghList(pathAndQuery: string): Promise<any[]> {
+  return (await ghPages(pathAndQuery)).flat();
+}
+
+/** Review bots whose comments reach the worker that follows the PR (other bots are noise). */
+export function isReviewBot(login: string | null | undefined, allowed: string[]): boolean {
+  const name = String(login ?? '').toLowerCase().replace(/\[bot\]$/, '');
+  return !!name && allowed.map((b) => b.toLowerCase().replace(/\[bot\]$/, '')).includes(name);
 }
 
 /**
@@ -25,6 +42,8 @@ async function ghJson(pathAndQuery: string): Promise<any> {
 export class GitHubSource {
   private timer: NodeJS.Timeout | null = null;
   private polling = false;
+  /** Bumped by stop(): a poll that was in flight must not schedule another loop when it ends. */
+  private generation = 0;
   login: string | null = null;
   lastError: string | null = null;
   lastPollAt: number | null = null;
@@ -33,15 +52,19 @@ export class GitHubSource {
 
   start(): void {
     this.stop();
+    const gen = this.generation;
     void this.detectLogin();
     const tick = async () => {
+      if (gen !== this.generation) return;
       await this.pollAll();
+      if (gen !== this.generation) return; // reloaded meanwhile: the new loop takes over
       this.timer = setTimeout(tick, this.app.config.github.pollSeconds * 1000);
     };
     this.timer = setTimeout(tick, 3000);
   }
 
   stop(): void {
+    this.generation++;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
   }
@@ -100,8 +123,12 @@ export class GitHubSource {
       ci: repo.ci,
     };
     const kw = [this.app.config.mention, '@superagent'];
+    const reviewBot = (user: any) => isBot(user) && isReviewBot(user?.login, this.app.config.github.reviewBots);
+    // Some requests may fail; what did arrive is still handled (it is deduplicated), but the cursor
+    // only moves once everything since it was read.
+    const failures: string[] = [];
 
-    const issues: any[] = (await ghJson(`repos/${slug}/issues?state=all&sort=updated&direction=asc&per_page=50&${q}`)) ?? [];
+    const issues: any[] = await ghList(`repos/${slug}/issues?state=all&sort=updated&direction=asc&per_page=100&${q}`);
     for (const it of issues) {
       const isPr = !!it.pull_request;
       const threadKey = `github:${slug}#${it.number}`;
@@ -142,7 +169,7 @@ export class GitHubSource {
       }
     }
 
-    const comments: any[] = (await ghJson(`repos/${slug}/issues/comments?sort=updated&direction=asc&per_page=100&${q}`)) ?? [];
+    const comments: any[] = await ghList(`repos/${slug}/issues/comments?sort=updated&direction=asc&per_page=100&${q}`);
     for (const c of comments) {
       if (Date.parse(c.created_at) < since) continue;
       const number = Number(String(c.issue_url).split('/').pop());
@@ -157,11 +184,11 @@ export class GitHubSource {
         text: c.body ?? '',
         url: c.html_url,
         createdAt: Date.parse(c.created_at),
-        policy: { ...base, isBot: isBot(c.user), mentioned: mentions(c.body ?? '', kw) },
+        policy: { ...base, isBot: isBot(c.user), reviewBot: reviewBot(c.user), mentioned: mentions(c.body ?? '', kw) },
       });
     }
 
-    const reviewComments: any[] = (await ghJson(`repos/${slug}/pulls/comments?sort=updated&direction=asc&per_page=100&${q}`)) ?? [];
+    const reviewComments: any[] = await ghList(`repos/${slug}/pulls/comments?sort=updated&direction=asc&per_page=100&${q}`);
     for (const c of reviewComments) {
       if (Date.parse(c.created_at) < since) continue;
       const number = Number(String(c.pull_request_url).split('/').pop());
@@ -177,7 +204,7 @@ export class GitHubSource {
         url: c.html_url,
         createdAt: Date.parse(c.created_at),
         meta: { path: c.path, line: c.line, diff_hunk: c.diff_hunk },
-        policy: { ...base, isBot: isBot(c.user), mentioned: mentions(c.body ?? '', kw) },
+        policy: { ...base, isBot: isBot(c.user), reviewBot: reviewBot(c.user), mentioned: mentions(c.body ?? '', kw) },
       });
     }
 
@@ -188,7 +215,10 @@ export class GitHubSource {
     );
     for (const { key: tk } of followed) {
       const number = tk.split('#')[1];
-      const reviews: any[] = (await ghJson(`repos/${slug}/pulls/${number}/reviews?per_page=50`).catch(() => [])) ?? [];
+      const reviews: any[] = await ghList(`repos/${slug}/pulls/${number}/reviews?per_page=100`).catch((e) => {
+        failures.push(`reviews of #${number}: ${(e as Error).message}`);
+        return [];
+      });
       for (const r of reviews) {
         if (!r.submitted_at || Date.parse(r.submitted_at) < since) continue;
         if (r.state === 'COMMENTED' && !r.body) continue; // inline comments arrive separately
@@ -202,14 +232,19 @@ export class GitHubSource {
           text: `Review ${String(r.state).toLowerCase().replace('_', ' ')}${r.body ? `: ${r.body}` : ''}`,
           url: r.html_url,
           createdAt: Date.parse(r.submitted_at),
-          policy: { ...base, isBot: isBot(r.user), mentioned: true },
+          policy: { ...base, isBot: isBot(r.user), reviewBot: reviewBot(r.user), mentioned: true },
         });
       }
     }
 
     if (repo.ci !== 'off') {
-      const runs: any = await ghJson(`repos/${slug}/actions/runs?per_page=25`).catch(() => null);
-      for (const wr of runs?.workflow_runs ?? []) {
+      // Only runs created since the day before the cursor, every page of them.
+      const day = new Date(since - 86_400_000).toISOString().slice(0, 10);
+      const pages = await ghPages(`repos/${slug}/actions/runs?per_page=100&created=${encodeURIComponent('>=' + day)}`).catch((e) => {
+        failures.push(`CI runs: ${(e as Error).message}`);
+        return [];
+      });
+      for (const wr of pages.flatMap((p: any) => p?.workflow_runs ?? [])) {
         if (wr.status !== 'completed' || Date.parse(wr.updated_at) < since) continue;
         let threadKey = `github:${slug}@${wr.head_branch}`;
         let subscribable = false;
@@ -242,6 +277,7 @@ export class GitHubSource {
       }
     }
 
+    if (failures.length) throw new Error(failures.join('; ')); // try the same window again next time
     this.app.store.setKv(key, new Date(pollStart - OVERLAP_MS).toISOString());
   }
 }

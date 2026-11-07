@@ -1,8 +1,10 @@
+import os from 'node:os';
 import type { App } from '../daemon/app.js';
 import type { AgentId } from '../core/config.js';
 import type { WorkerRow, WorkerStatus } from '../core/store.js';
 import { emit, log, ref, snippet, tail } from '../core/util.js';
 import { adapterFor, type AgentEvent } from '../agents/adapters.js';
+import { isAlive, killTree, processStartTime } from '../agents/process.js';
 import { startWorkerRun } from '../agents/runner.js';
 import { findPrUrl, firstPrompt, followupPrompt, parseReport, workerSystem } from './prompts.js';
 import { prepareWorkspace, removeWorkspace, syncBranch, type Workspace } from './workspace.js';
@@ -25,13 +27,32 @@ export interface CreateWorker {
   replyThreadId?: number | null;
   originTriggerId?: number | null;
   silent?: boolean;
+  /** Branch or ref to start from instead of the repo's default branch. */
+  base?: string | null;
   createdBy: 'router' | 'user';
 }
 
 const PR_THREAD_RE = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/;
 
+/** The agent's saved session no longer exists (and only that: "module not found" must not reset a task). */
+export const SESSION_GONE =
+  /\b(no|unknown|could not find|cannot find|couldn't find|invalid)\b[^\n]{0,30}\b(conversation|session|thread)\b|\b(conversation|session|thread)\b[^\n]{0,30}\b(not found|does not exist|doesn't exist|expired)\b/i;
+
 export class WorkerManager {
   private active = new Map<number, ActiveRun>();
+  private memoryTimer: NodeJS.Timeout | null = null;
+  private memoryNoted = 0;
+
+  /** Less free memory than workers.minFreeMemoryMB (logged at most every 10 minutes). */
+  private lowMemory(): boolean {
+    const freeMB = Math.round(os.freemem() / 1048576);
+    const low = freeMB < this.app.config.workers.minFreeMemoryMB;
+    if (low && Date.now() - this.memoryNoted > 10 * 60_000) {
+      this.memoryNoted = Date.now();
+      log(`only ${freeMB} MB of memory free (workers.minFreeMemoryMB is ${this.app.config.workers.minFreeMemoryMB}); queued workers wait`);
+    }
+    return low;
+  }
   private lastTouch = new Map<number, number>();
 
   constructor(private app: App) {}
@@ -64,6 +85,7 @@ export class WorkerManager {
       reply_thread_id: spec.replyThreadId ?? store.localThread().id,
       origin_trigger_id: spec.originTriggerId ?? null,
       silent: spec.silent,
+      base: spec.base ?? null,
       created_by: spec.createdBy,
     });
     const threads = new Set(spec.threads ?? []);
@@ -128,10 +150,23 @@ export class WorkerManager {
     const w = this.app.store.workerById(id);
     if (!w) return;
     if (this.active.has(id) || ['queued', 'running'].includes(w.status)) this.stop(id, 'archived');
+    // On Windows a process that still has files open makes the delete fail halfway (EBUSY).
+    for (let i = 0; i < 50 && this.active.has(id); i++) await new Promise((r) => setTimeout(r, 200));
+    if (this.active.has(id)) throw new Error(`${ref.W(id)} is still stopping; archive it again in a moment`);
     await removeWorkspace(w);
     this.app.store.unsubscribeAll(id);
     this.app.store.updateWorker(id, { archived: 1 });
     this.changed(id);
+  }
+
+  /** Archive finished workers last touched more than `days` ago; returns their ids. */
+  async cleanup(days: number): Promise<number[]> {
+    const before = Date.now() - days * 86_400_000;
+    const old = this.app.store
+      .all<WorkerRow>("SELECT * FROM workers WHERE archived = 0 AND status IN ('done', 'failed', 'stopped') AND updated_at < ? ORDER BY id", before)
+      .filter((w) => !this.active.has(w.id));
+    for (const w of old) await this.archive(w.id);
+    return old.map((w) => w.id);
   }
 
   retry(id: number): void {
@@ -157,6 +192,11 @@ export class WorkerManager {
     const ids = new Set<number>([...store.workersWithStatus('queued').map((w) => w.id), ...store.workersWithMail()]);
     for (const id of [...ids].sort((a, b) => a - b)) {
       if (this.active.size >= max) break;
+      // Each agent takes a few hundred MB: on a busy machine the rest wait (one always runs).
+      if (this.active.size > 0 && this.lowMemory()) {
+        this.memoryTimer ??= setTimeout(() => ((this.memoryTimer = null), this.schedule()), 30_000);
+        break;
+      }
       const w = store.workerById(id);
       if (w && this.needsRun(w)) void this.startRun(w);
     }
@@ -222,13 +262,21 @@ export class WorkerManager {
     } catch (e) {
       const msg = (e as Error).message ?? String(e);
       log(`worker ${ref.W(id)} failed to start:`, msg);
+      // The mail this run was started for counts as delivered (to a failed start). Otherwise it would
+      // stay "undelivered" and schedule() would start the worker again at once, in a tight loop.
+      const undelivered = store.undelivered(id);
+      if (undelivered.length) {
+        store.run('UPDATE inbox SET run_id = -1 WHERE worker_id = ? AND run_id IS NULL', id);
+        store.addLog(id, entry.runId || null, 'system', `${undelivered.length} message${undelivered.length === 1 ? '' : 's'} not delivered because the worker could not start`);
+      }
       store.updateWorker(id, { status: 'failed', error: msg, pid: null });
       store.addLog(id, entry.runId || null, 'error', msg);
       this.report(id, 'failed', '', null, null, msg);
       this.changed(id);
     } finally {
       this.active.delete(id);
-      this.schedule();
+      // Never re-enter startRun from inside its own unwinding.
+      setImmediate(() => this.schedule());
     }
   }
 
@@ -239,8 +287,7 @@ export class WorkerManager {
       return;
     }
     if (ev.kind === 'final') return;
-    const row = store.addLog(id, runId, ev.kind, ev.text.slice(0, 20_000));
-    emit('worker_log', row);
+    if (ev.kind !== 'ping') emit('worker_log', store.addLog(id, runId, ev.kind, ev.text.slice(0, 20_000)));
     const now = Date.now();
     if (now - (this.lastTouch.get(id) ?? 0) > 2000) {
       this.lastTouch.set(id, now);
@@ -273,7 +320,7 @@ export class WorkerManager {
     }
 
     // A resumed session that no longer exists: start over with the original task.
-    if (!fresh && res.error && /no (conversation|session|thread)|not found|could not find|unknown session/i.test(res.error)) {
+    if (!fresh && res.error && SESSION_GONE.test(res.error)) {
       store.run('UPDATE inbox SET run_id = NULL WHERE run_id = ?', runId);
       store.updateRun(runId, { status: 'failed', ended_at: ended, exit_code: res.code, result: res.error });
       store.updateWorker(id, { agent_session: null, status: 'queued', pid: null });
@@ -287,7 +334,7 @@ export class WorkerManager {
     let error: string | null = null;
     let summary: string;
     if (report) {
-      status = report.status === 'needs_input' ? 'waiting' : report.status;
+      status = report.status === 'needs_input' ? 'waiting' : report.status === 'no_change' ? 'done' : report.status;
       summary = report.summary || snippet(res.finalText, 600);
       // Keep the question on the worker itself so `workers`, `logs` and the router can show it.
       if (report.question) summary = `${summary}\n\n**Question:** ${report.question}`;
@@ -299,7 +346,10 @@ export class WorkerManager {
       status = 'done';
       summary = snippet(res.finalText, 600) || 'Finished without a report.';
     }
-    const pr = report?.pr_url ?? findPrUrl(res.finalText);
+    const repoSlug = this.app.findRepo(w.repo ?? undefined)?.slug?.toLowerCase();
+    // A report that says "no PR" means it; a PR link elsewhere in the text only counts for this repo.
+    const found = report ? report.pr_url : findPrUrl(res.finalText);
+    const pr = found && (!repoSlug || found.toLowerCase().includes(`github.com/${repoSlug}/pull/`)) ? found : null;
     store.updateRun(runId, {
       status,
       ended_at: ended,
@@ -322,7 +372,8 @@ export class WorkerManager {
     this.report(id, report?.status ?? (error ? 'failed' : 'done'), summary, pr, report?.question ?? null, error);
     const line =
       status === 'waiting' ? `${ref.W(id)} needs your input: ${w.title}` : `${status === 'done' ? 'Finished' : 'Failed'} ${ref.W(id)}: ${w.title}`;
-    if (!w.silent || status === 'done') this.announce(w, line, status);
+    // A silent task is only news when it changed something.
+    if (!w.silent || (status === 'done' && report?.status !== 'no_change')) this.announce(w, line, status);
     this.changed(id);
   }
 
@@ -348,15 +399,28 @@ export class WorkerManager {
       meta: { worker: id, status, pr_url: pr, question, error },
       // Acting ahead (Section 3.4): a silent task is only news if it worked. Its other results are kept
       // on the worker and in the activity log, but no router is asked to announce them.
+      // (no_change, nothing needed doing, is dropped the same way.)
       policy: w?.silent && status !== 'done' ? { dropReason: `silent task ended ${status}` } : undefined,
     });
   }
 
   /** After a crash or reboot: runs that were in flight resume from their saved agent session. */
-  recover(): void {
+  async recover(): Promise<void> {
     const { store } = this.app;
+    const interrupted = store.all<{ worker_id: number; started_at: number }>("SELECT worker_id, started_at FROM worker_runs WHERE status = 'running'");
     store.run("UPDATE worker_runs SET status = 'interrupted', ended_at = ? WHERE status = 'running'", Date.now());
     for (const w of store.workersWithStatus('running')) {
+      // Still alive from before the crash: it can't be re-attached, and two runs must never share a
+      // workspace. Only end it if that pid really is this run (a recycled pid started at another time),
+      // and wait until it is gone.
+      const runStart = interrupted.find((r) => r.worker_id === w.id)?.started_at;
+      if (w.pid && runStart && isAlive(w.pid)) {
+        const started = await processStartTime(w.pid);
+        if (started !== null && Math.abs(started - runStart) < 30_000) {
+          killTree(w.pid);
+          for (let i = 0; i < 50 && isAlive(w.pid); i++) await new Promise((r) => setTimeout(r, 200));
+        }
+      }
       store.addInbox(
         w.id,
         'system',

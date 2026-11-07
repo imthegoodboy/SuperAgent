@@ -7,7 +7,8 @@ import { extractJsonObject, sleep } from '../core/util.js';
 import { adapterFor } from '../agents/adapters.js';
 import { killTree } from '../agents/process.js';
 import { startRouterRun } from '../agents/runner.js';
-import { EXIT_PORT_IN_USE } from './main.js';
+import { servicePort } from '../core/instance.js';
+import { EXIT_ALREADY_RUNNING, EXIT_PORT_IN_USE } from './main.js';
 
 /*
  * Section 6 of the design: an independent control loop outside the main system.
@@ -52,8 +53,7 @@ function token(): string {
 }
 
 async function call(method: string, p: string, body?: unknown, timeoutMs = 8000): Promise<any> {
-  const port = loadConfig().port;
-  const res = await fetch(`http://127.0.0.1:${port}${p}`, {
+  const res = await fetch(`http://127.0.0.1:${servicePort()}${p}`, {
     method,
     headers: { authorization: `Bearer ${token()}`, 'content-type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -112,8 +112,8 @@ export async function runWatchdog(): Promise<void> {
       fs.closeSync(fd);
       child = null;
       if (fs.existsSync(STOP_FLAG)) return finish();
-      if (code === EXIT_PORT_IN_USE) {
-        wlog('daemon could not bind its port; another instance is probably running');
+      if (code === EXIT_PORT_IN_USE || code === EXIT_ALREADY_RUNNING) {
+        wlog(code === EXIT_ALREADY_RUNNING ? 'SuperAgent already runs for this data folder; this watchdog is not needed' : 'daemon could not bind its port; another instance is probably running');
         return finish();
       }
       const now = Date.now();

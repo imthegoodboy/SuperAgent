@@ -69,6 +69,7 @@ chat), `W#n` a worker. Long text is cut (`… [+N chars: recall T#n]`); use `sup
   thread is a GitHub or Telegram thread, also `superagent reply TH#n "…"` there.
 - **REPORT, status=needs_input** → put the worker's exact question to the user, then send the answer
   with `superagent tell W#n "…"`. If it came from GitHub, ask there with `reply`.
+- **REPORT, status=no_change** → nothing needed changing (could not reproduce, already fixed); say so.
 - **REPORT, status=failed** → say what failed; `superagent retry W#n`, or dispatch a better-briefed worker.
 - **EXPLICIT** (someone addressed SuperAgent on GitHub or Telegram) → handle it like a user request and
   acknowledge there with `reply`. From GitHub, dispatch with `--follow TH#n --reply TH#n`, so later comments
@@ -84,7 +85,8 @@ chat), `W#n` a worker. Long text is cut (`… [+N chars: recall T#n]`); use `sup
 
 ```bash
 superagent dispatch "<task>" [--agent claude|codex|opencode|cursor] [--repo web|owner/repo|.]
-                             [--title "Short title"] [--follow TH#8,TH#9] [--reply TH#8] [--silent]
+                             [--base feature-branch] [--title "Short title"] [--follow TH#8,TH#9]
+                             [--reply TH#8] [--silent]
 superagent tell W#3 "<new instructions or information>" [--now]   # resumes with its memory; --now interrupts
 superagent cancel W#3 [--reason "…"]
 superagent reply TH#8 "<message>"                        # GitHub issue/PR comment, Telegram message
@@ -94,11 +96,12 @@ superagent follow W#3 TH#9 / superagent unfollow W#3 TH#9    # GitHub issues and
 superagent remember "<durable fact or preference>"     # memory / forget <id>
 superagent workers · superagent logs W#3 · superagent diff W#3 [--patch] · superagent graph
 superagent status · superagent activity
-superagent retry W#3 · superagent archive W#3
+superagent retry W#3 · superagent archive W#3 · superagent cleanup [--days 7]
 superagent repo add <path|owner/repo> [--mode mentions|all|off] [--allow alice,bob] · superagent repo list
 ```
 
-Long or multi-line text: pass `-` and pipe it in, so quotes and `$` in it are safe.
+Always quote text arguments. Long or multi-line text: pass `-` and pipe it in, so quotes and `$` in it
+are safe.
 
 ```bash
 superagent dispatch - --repo web --title "CSV export" <<'EOF'
@@ -146,7 +149,10 @@ added on first use. Without a repo the worker gets an empty scratch folder.
 Where a worker starts: in a repo on GitHub, from the freshly fetched default branch, so it does **not** see
 unpushed commits or uncommitted changes. In a local-only repo, from the last commit of the current branch,
 so it does not see uncommitted changes. If the task depends on them, ask the user to commit (and push),
-or describe the changes in the task.
+or describe the changes in the task. To build on a branch other than the default, pass `--base <branch>`.
+
+`dispatch` says when a worker is **queued** (all slots busy, or too little free memory); it starts by
+itself once a slot is free and there is enough memory.
 
 ## Rules
 

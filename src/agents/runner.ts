@@ -26,12 +26,17 @@ function resolveAdapter(adapter: AgentAdapter): Resolved | null {
   return adapter.resolve ? adapter.resolve() : resolveCommand(adapter.command);
 }
 
-/** Prompts for agents launched through cmd/powershell go through a file, since those shells mangle newlines. */
-function promptArg(prompt: string, via: Resolved['via']): string {
-  if (via === 'exe' || via === 'node' || via === 'plain') return prompt;
+/**
+ * A prompt passed as an argument goes through a file when the command line can't carry it intact:
+ * cmd/PowerShell wrappers mangle newlines, and on Windows some programs (OpenCode's Bun build) don't
+ * undo Node's escaping of `"` as `\"`. Very long prompts would also exceed the command-line limit.
+ */
+export function promptArg(prompt: string, via: Resolved['via'], platform: string = process.platform): string {
+  const direct = (via === 'exe' || via === 'node' || via === 'plain') && platform !== 'win32' && Buffer.byteLength(prompt) <= 100_000;
+  if (direct) return prompt;
   const file = path.join(paths.prompts, `${Date.now()}-${crypto.randomBytes(4).toString('hex')}.md`);
   fs.mkdirSync(paths.prompts, { recursive: true });
-  fs.writeFileSync(file, prompt);
+  fs.writeFileSync(file, prompt, { mode: 0o600 }); // task text is private; deleted when the run ends
   return `Read the file ${file} and follow the instructions in it exactly.`;
 }
 
@@ -65,6 +70,7 @@ function launch(
   let lastText = '';
   const errors: string[] = [];
   const handle = (ev: AgentEvent) => {
+    if (ev.kind === 'ping') return onEvent(ev);
     if (ev.kind === 'session') session = ev.id;
     else if (ev.kind === 'final') finalText = ev.text;
     else if (ev.kind === 'text') lastText = ev.text;
@@ -72,13 +78,18 @@ function launch(
     onEvent(ev);
   };
 
-  const fullArgs = adapter.promptVia === 'arg' ? [...args, promptArg(prompt, resolved.via)] : args;
+  const promptText = adapter.promptVia === 'arg' ? promptArg(prompt, resolved.via) : null;
+  const promptFile = promptText?.match(/^Read the file (.+?) and follow/)?.[1] ?? null;
+  const fullArgs = promptText !== null ? [...args, promptText] : args;
   const proc = startProcess(resolved, {
     cwd,
     args: fullArgs,
     stdin: adapter.promptVia === 'stdin' ? prompt : undefined,
     env,
     timeoutMs,
+    // Any output, even without a newline, is a sign of life (a long subagent or build prints nothing
+    // the parser keeps).
+    onChunk: () => handle({ kind: 'ping' }),
     onLine: (line, stream) => {
       if (stream === 'stdout') {
         for (const ev of parse(line)) handle(ev);
@@ -87,6 +98,7 @@ function launch(
   });
 
   const done = proc.done.then((r) => {
+    if (promptFile) fs.rmSync(promptFile, { force: true });
     let error: string | null = null;
     if (r.spawnError) error = `Could not start ${adapter.label}: ${r.spawnError}`;
     else if (r.timedOut) error = `${adapter.label} timed out.`;
@@ -110,6 +122,16 @@ export function startRouterRun(adapter: AgentAdapter, spec: RouterSpec, timeoutM
       ? spec.prompt
       : `${spec.system}\n\n---\n\n${spec.prompt}\n\nRespond with ONLY the JSON object, no prose.`;
   return launch(adapter, spec.cwd, adapter.routerArgs(spec), prompt, () => {}, timeoutMs);
+}
+
+// ---------- sign-in ----------
+
+/** Is this agent signed in? null when it can't tell (OpenCode's free models need no login). */
+export async function checkSignIn(id: string): Promise<{ signedIn: boolean | null; login: string | null }> {
+  const a = ADAPTERS[id];
+  if (!a?.auth) return { signedIn: null, login: null };
+  const r = await run(a.command, a.auth.args, { timeoutMs: 25_000, cwd: os.homedir() });
+  return { signedIn: a.auth.signedIn(`${r.stdout}\n${r.stderr}`), login: a.auth.login };
 }
 
 // ---------- detection ----------

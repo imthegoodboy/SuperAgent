@@ -5,7 +5,7 @@ import { renderForWorker } from '../triggers/ingest.js';
 import type { Workspace } from './workspace.js';
 
 export interface Report {
-  status: 'done' | 'needs_input' | 'failed';
+  status: 'done' | 'needs_input' | 'failed' | 'no_change';
   summary: string;
   pr_url: string | null;
   question: string | null;
@@ -35,7 +35,7 @@ export function workerSystem(app: App, w: WorkerRow, ws: Workspace): string {
     lines.push(`- You are on git branch \`${ws.branch}\` (created from \`${ws.base}\`). Commit your changes to this branch with clear messages. Commit only files that belong to the task: never caches, temporary folders or tool state (stage paths explicitly rather than \`git add -A\`).`);
     if (repo?.slug && app.config.workers.allowDraftPRs) {
       lines.push(
-        `- When the work is complete and verified, push your branch (\`git push -u origin ${ws.branch}\`) and open a DRAFT pull request against \`${defaultBranch}\` with \`gh pr create --draft\`. Write a complete PR description (problem, change, how it was verified) and end the body with the line \`<!-- superagent:${ref.W(w.id)} -->\`. If a PR for your branch already exists, just push to it.`,
+        `- When the work is complete and verified, push your branch (\`git push -u origin ${ws.branch}\`) and open a DRAFT pull request against \`${defaultBranch}\` with \`gh pr create --draft --base ${defaultBranch}\`. Write a complete PR description (problem, change, how it was verified) and end the body with the line \`<!-- superagent:${ref.W(w.id)} -->\`. If a PR for your branch already exists, just push to it.`,
       );
     } else {
       lines.push('- Do not push or open pull requests; leave your commits on the local branch.');
@@ -50,7 +50,8 @@ export function workerSystem(app: App, w: WorkerRow, ws: Workspace): string {
     '- If you are blocked or need a human decision, stop and ask through the report (status "needs_input").',
     '',
     'Finish EVERY run with exactly one report block as the very last thing in your final message:',
-    '<superagent-report>{"status":"done|needs_input|failed","summary":"1-3 sentences for the Router","pr_url":"https://github.com/... or null","question":"only when needs_input"}</superagent-report>',
+    '<superagent-report>{"status":"done|no_change|needs_input|failed","summary":"1-3 sentences for the Router","pr_url":"https://github.com/... or null","question":"only when needs_input"}</superagent-report>',
+    'Use "no_change" when there was nothing to do: the problem could not be reproduced, or it is already fixed.',
   );
   return lines.join('\n');
 }
@@ -97,7 +98,7 @@ export function parseReport(text: string): Report | null {
   if (!raw) return null;
   const j = extractJsonObject(raw);
   if (!j) return { status: 'done', summary: raw.slice(0, 600), pr_url: text.match(PR_RE)?.[0] ?? null, question: null };
-  const status = ['done', 'needs_input', 'failed'].includes(j.status) ? j.status : 'done';
+  const status = ['done', 'needs_input', 'failed', 'no_change'].includes(j.status) ? j.status : 'done';
   const pr = typeof j.pr_url === 'string' && PR_RE.test(j.pr_url) ? j.pr_url.match(PR_RE)![0] : null;
   return {
     status,

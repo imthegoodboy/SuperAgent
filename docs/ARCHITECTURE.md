@@ -86,7 +86,9 @@ Every input becomes a **trigger** in a **thread** (`src/triggers/ingest.ts`):
 | Watchdog alert | (none) | `/api/watchdog/action` |
 
 **Two-stage filtering (3.1):** `src/triggers/policy.ts` is the fast path: pure code, no model. It drops
-SuperAgent's own posts (an HTML comment marker), bots, users outside the allowlist, sources that are
+SuperAgent's own posts (an HTML comment marker), bots (except configured code-review bots on a GitHub thread a
+worker follows, such as its PR: `github.reviewBots`), users outside the allowlist (Telegram matches usernames or numeric ids, never
+display names), sources that are
 off, passing CI, and unaddressed messages in "mentions" mode. What survives is **explicit** (addressed
 to the agent) or a **candidate** (from a "watch everything" source). The router is the slow path: its
 system prompt plus the user's plain-language **policies** decide what to do with candidates, including
@@ -107,6 +109,11 @@ turn). When the router session is rotated (`router.rotateAfterTurns`) or recreat
 next turn starts with a primer: configured repos, available agents, policies, long-term `remember`
 notes, recent messages, and recent workers. `superagent router attach` prints the same context for an
 attached agent.
+
+A worker that fails before its run starts (its repo moved, a clone failed) consumes the messages it was
+started for, so it can't restart in a loop; any output from an agent, even without a newline, counts as
+activity for the stall check,
+and a run ends when its process exits even if a leftover child still holds the output pipe.
 
 **Acting ahead (3.4):** the router can dispatch with `silent: true`. A silent worker's result is only
 announced if it reports `done`. Otherwise its report is dropped by the fast path in code, so neither
@@ -145,7 +152,9 @@ separation on one machine:
 `src/daemon/watchdog.ts` runs as its own process (`superagent start` launches it, and it launches the
 daemon). It:
 
-- restarts the daemon when it exits unexpectedly (with backoff) or stops answering `/api/health`;
+- restarts the daemon when it exits unexpectedly (with backoff) or stops answering `/api/health`. Only one
+  service runs per data folder: the daemon records its pid and real port in `run/daemon.json`, the CLI and
+  the watchdog talk to that port (a changed `port` applies on restart), and a second daemon exits;
 - restarts a worker's run when it has produced no output for `workers.stallMinutes`, with a note to
   avoid whatever was hanging (dev servers and watch modes are the usual culprits);
 - every `watchdog.checkMinutes`, asks the router model whether each long-running worker is making

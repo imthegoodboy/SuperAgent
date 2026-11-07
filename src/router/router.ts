@@ -65,6 +65,7 @@ export const ROUTER_SCHEMA = {
           silent: { type: 'boolean' },
           worker: { type: 'string' },
           now: { type: 'boolean' },
+          base: { type: 'string' },
           reason: { type: 'string' },
           ids: { type: 'array', items: { type: 'string' } },
           triggers: { type: 'array', items: { type: 'string' } },
@@ -92,6 +93,8 @@ export interface Lease {
   expiresAt: number;
   /** The holding session's identity, when its harness exposes one. */
   owner: string | null;
+  /** Where that session runs, for people ("Claude Code in C:\\code\\web"). */
+  who: string | null;
 }
 
 /** A router command from a session that does not hold the lease. */
@@ -185,10 +188,10 @@ export class Router {
 
   /** The current lease, if an agent session is the router right now. */
   lease(): Lease | null {
-    const raw = tryJson<{ since: number; renewedAt: number; owner?: string | null }>(this.app.store.getKv('router.lease') ?? '');
+    const raw = tryJson<{ since: number; renewedAt: number; owner?: string | null; who?: string | null }>(this.app.store.getKv('router.lease') ?? '');
     if (!raw?.renewedAt) return null;
     const expiresAt = raw.renewedAt + this.app.config.router.leaseMinutes * 60_000;
-    if (Date.now() < expiresAt) return { since: raw.since, renewedAt: raw.renewedAt, expiresAt, owner: raw.owner ?? null };
+    if (Date.now() < expiresAt) return { since: raw.since, renewedAt: raw.renewedAt, expiresAt, owner: raw.owner ?? null, who: raw.who ?? null };
     this.expire();
     return null;
   }
@@ -214,7 +217,7 @@ export class Router {
 
   private conflict(cur: Lease): LeaseConflict {
     return new LeaseConflict(
-      `Another agent session is the router (attached ${ago(cur.since)}, last command ${ago(cur.renewedAt)}). ` +
+      `Another agent session is the router: ${cur.who ?? 'unknown session'} (attached ${ago(cur.since)}, last command ${ago(cur.renewedAt)}). ` +
         'Take over with `superagent router attach --take` only if that session has ended or the user says so.',
     );
   }
@@ -226,11 +229,12 @@ export class Router {
   }
 
   /** Keep (or take) the router role for this session. */
-  private renew(owner: string | null): void {
+  private renew(owner: string | null, who?: string | null): void {
     const cur = this.lease();
     const now = Date.now();
-    const since = cur && cur.owner === owner ? cur.since : now;
-    this.app.store.setKv('router.lease', JSON.stringify({ since, renewedAt: now, owner }));
+    const same = !!cur && cur.owner === owner;
+    const since = same ? cur.since : now;
+    this.app.store.setKv('router.lease', JSON.stringify({ since, renewedAt: now, owner, who: who ?? (same ? cur.who : null) }));
     this.armLeaseTimer(now + this.app.config.router.leaseMinutes * 60_000);
     if (!cur) {
       log('router: an agent session attached as the router');
@@ -262,12 +266,16 @@ export class Router {
    * is refused while the lease is held, unless `take`. Sessions without an identity can't be told
    * apart, so they need `take` too.
    */
-  async attach(take: boolean, owner: string | null): Promise<{ text: string; lease: Lease }> {
+  async attach(take: boolean, owner: string | null, who: string | null = null): Promise<{ text: string; lease: Lease }> {
     const cur = this.lease();
     const sameSession = !!cur && owner !== null && cur.owner === owner;
     if (cur && !take && !sameSession) throw this.conflict(cur);
-    if (cur && !sameSession) log('router: a new agent session took over as the router');
-    this.renew(owner);
+    if (cur && !sameSession) {
+      log('router: a new agent session took over as the router');
+      // The session being replaced may have died holding events it never acted on.
+      this.requeueUnhandled();
+    }
+    this.renew(owner, who);
     await this.app.agentsReady; // right after the service starts, agents are still being detected
     await this.whenIdle();
     return { text: renderAttach(this.app, this.takeAway()), lease: this.lease()! };
@@ -278,6 +286,7 @@ export class Router {
     if (!this.lease()) return;
     this.checkOwner(owner);
     log('router: the agent session detached; the background router takes over');
+    this.requeueUnhandled(); // events it was given but never acted on go to the background router
     this.endLease();
   }
 
@@ -307,11 +316,11 @@ export class Router {
    * The attached agent's inbox: every event that needs a router decision, batched (Section 2.1),
    * plus FYI lines for events already handled in code. With `waitMs`, waits for the next event.
    */
-  async events(waitMs: number, signal: AbortSignal | undefined, owner: string | null): Promise<EventsResult> {
+  async events(waitMs: number, signal: AbortSignal | undefined, owner: string | null, who: string | null = null): Promise<EventsResult> {
     const { store } = this.app;
     const deadline = Date.now() + Math.max(0, waitMs); // time spent waiting below counts too
     this.checkOwner(owner);
-    this.renew(owner);
+    this.renew(owner, who);
     await this.whenIdle(); // a background turn that is already running finishes first
     const mine = this.lease()!.since;
     const away = this.takeAway();
@@ -367,10 +376,10 @@ export class Router {
   }
 
   /** Actions from the attached agent: the same action types the background router emits. */
-  async act(actions: Action[], owner: string | null): Promise<{ results: ActionResult[]; away_pending: boolean }> {
+  async act(actions: Action[], owner: string | null, who: string | null = null): Promise<{ results: ActionResult[]; away_pending: boolean }> {
     const { store } = this.app;
     this.checkOwner(owner);
-    this.renew(owner);
+    this.renew(owner, who);
     await this.app.agentsReady;
     await this.whenIdle(); // never act alongside a background turn that was already running
     const batch = (tryJson<number[]>(store.getKv('router.ext.batch') ?? '[]') ?? [])
@@ -395,7 +404,8 @@ export class Router {
       store.updateTurn(turnId, { ended_at: Date.now(), session: 'attached agent' });
       store.setKv('router.ext.turn', String(turnId));
     }
-    store.updateTurn(turnId, { actions: JSON.stringify([...turnActions(turn?.actions ?? null), ...actions]) });
+    const succeeded = actions.filter((_, i) => results[i]?.ok);
+    store.updateTurn(turnId, { actions: JSON.stringify([...turnActions(turn?.actions ?? null), ...succeeded]) });
     emit('router_turn', store.get('SELECT * FROM router_turns WHERE id = ?', turnId));
     // The "while you were away" summary waits for the next `events`; say that it is there.
     return { results, away_pending: !!store.getKv('router.awaySince') };
@@ -410,11 +420,24 @@ export class Router {
     const { store } = this.app;
     const turnId = Number(store.getKv('router.ext.turn') ?? 0);
     const turn = turnId ? store.get<{ actions: string | null; session: string | null }>('SELECT actions, session FROM router_turns WHERE id = ?', turnId) : undefined;
-    if (!turn || turn.session !== 'attached agent' || turnActions(turn.actions).length) return;
-    const back = store.all<TriggerRow>(
-      "SELECT * FROM triggers WHERE router_turn_id = ? AND status = 'handled' AND decision IN ('explicit', 'candidate') AND source != 'worker'",
-      turnId,
-    );
+    if (!turn || turn.session !== 'attached agent') return;
+    const acts = turnActions(turn.actions);
+    const th = (v: unknown) => parseRefOf('TH', v);
+    // An event counts as handled when an action points at it (ignore T#n) or at its thread (a reply there,
+    // a dispatch that follows or reports to it). Events without a thread: any action at all.
+    const handled = (t: TriggerRow) =>
+      acts.some(
+        (a) =>
+          (a.type === 'ignore' && (a.triggers ?? []).some((x: unknown) => parseRefOf('T', x) === t.id)) ||
+          (!!t.thread_id && a.type === 'reply' && th(a.thread) === t.thread_id) ||
+          (!!t.thread_id && a.type === 'dispatch' && (th(a.reply_thread) === t.thread_id || (a.threads ?? []).some((x: unknown) => th(x) === t.thread_id))),
+      ) || (!t.thread_id && acts.length > 0);
+    const back = store
+      .all<TriggerRow>(
+        "SELECT * FROM triggers WHERE router_turn_id = ? AND status = 'handled' AND decision IN ('explicit', 'candidate') AND source != 'worker'",
+        turnId,
+      )
+      .filter((t) => !handled(t));
     for (const t of back) {
       store.updateTrigger(t.id, { status: 'pending', router_turn_id: null });
       emit('trigger', store.triggerById(t.id));
@@ -650,6 +673,7 @@ export class Router {
             if (repo) break;
           }
         }
+        if (a.base && !repo) throw new Error('--base needs a repository (--repo)');
         const requested = String(a.agent ?? '').toLowerCase();
         if (by === 'agent' && requested && !this.app.availableAgents().includes(requested as AgentId)) {
           throw new Error(`agent "${requested}" is not available. Available: ${this.app.availableAgents().join(', ') || 'none'}`);
@@ -667,11 +691,16 @@ export class Router {
           replyThreadId: replyThread,
           originTriggerId: origin?.id ?? null,
           silent: !!a.silent,
+          base: typeof a.base === 'string' && a.base.trim() ? a.base.trim() : null,
           createdBy: 'router',
         });
         if (requested && requested !== agent) this.note(`${ref.W(w.id)} uses ${agent} because ${requested} is not available.`);
+        const now = store.workerById(w.id)!;
         return {
           worker: ref.W(w.id),
+          status: now.status, // "queued" when every slot is busy
+          running: workers.runningCount,
+          max: this.app.config.workers.maxConcurrent,
           agent,
           title: w.title,
           repo: w.repo,
