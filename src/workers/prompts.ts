@@ -5,7 +5,7 @@ import { renderForWorker } from '../triggers/ingest.js';
 import type { Workspace } from './workspace.js';
 
 export interface Report {
-  status: 'done' | 'needs_input' | 'failed';
+  status: 'done' | 'needs_input' | 'failed' | 'no_change';
   summary: string;
   pr_url: string | null;
   question: string | null;
@@ -50,7 +50,8 @@ export function workerSystem(app: App, w: WorkerRow, ws: Workspace): string {
     '- If you are blocked or need a human decision, stop and ask through the report (status "needs_input").',
     '',
     'Finish EVERY run with exactly one report block as the very last thing in your final message:',
-    '<superagent-report>{"status":"done|needs_input|failed","summary":"1-3 sentences for the Router","pr_url":"https://github.com/... or null","question":"only when needs_input"}</superagent-report>',
+    '<superagent-report>{"status":"done|no_change|needs_input|failed","summary":"1-3 sentences for the Router","pr_url":"https://github.com/... or null","question":"only when needs_input"}</superagent-report>',
+    'Use "no_change" when there was nothing to do: the problem could not be reproduced, or it is already fixed.',
   );
   return lines.join('\n');
 }
@@ -97,7 +98,7 @@ export function parseReport(text: string): Report | null {
   if (!raw) return null;
   const j = extractJsonObject(raw);
   if (!j) return { status: 'done', summary: raw.slice(0, 600), pr_url: text.match(PR_RE)?.[0] ?? null, question: null };
-  const status = ['done', 'needs_input', 'failed'].includes(j.status) ? j.status : 'done';
+  const status = ['done', 'needs_input', 'failed', 'no_change'].includes(j.status) ? j.status : 'done';
   const pr = typeof j.pr_url === 'string' && PR_RE.test(j.pr_url) ? j.pr_url.match(PR_RE)![0] : null;
   return {
     status,

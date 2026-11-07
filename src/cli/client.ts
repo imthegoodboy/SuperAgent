@@ -1,9 +1,10 @@
 import fs from 'node:fs';
-import { loadConfig } from '../core/config.js';
+import { servicePort } from '../core/instance.js';
 import { HOME_ID, paths } from '../core/paths.js';
 
+/** The running service's real port, even if `port` was changed in the config since it started. */
 export function baseUrl(): string {
-  return `http://127.0.0.1:${loadConfig().port}`;
+  return `http://127.0.0.1:${servicePort()}`;
 }
 
 export function token(): string {
@@ -31,7 +32,12 @@ export async function api<T = any>(method: string, path: string, body?: unknown)
   try {
     res = await fetch(`${baseUrl()}${path}`, {
       method,
-      headers: { authorization: `Bearer ${token()}`, 'content-type': 'application/json', 'x-superagent-session': sessionId() },
+      headers: {
+        authorization: `Bearer ${token()}`,
+        'content-type': 'application/json',
+        'x-superagent-session': sessionId(),
+        'x-superagent-client': clientDescription(),
+      },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch (e) {
@@ -50,6 +56,14 @@ export async function api<T = any>(method: string, path: string, body?: unknown)
  */
 export function sessionId(): string {
   return (process.env.SUPERAGENT_SESSION || process.env.CLAUDE_CODE_SESSION_ID || process.env.CODEX_THREAD_ID || '').slice(0, 200);
+}
+
+/** Which agent and folder this command comes from, so a refused session can find the router's window. */
+export function clientDescription(): string {
+  const e = process.env;
+  const kind = e.CLAUDECODE || e.CLAUDE_CODE_SESSION_ID ? 'Claude Code' : e.CODEX_THREAD_ID || e.CODEX_SANDBOX ? 'Codex' : e.OPENCODE ? 'OpenCode' : e.CURSOR_AGENT ? 'Cursor' : 'a terminal';
+  const id = sessionId();
+  return `${kind}${id ? ` session ${id.slice(0, 8)}` : ''} in ${process.cwd()}`.slice(0, 300);
 }
 
 /** Minimal Server-Sent Events reader over fetch. Returns a function that closes the stream. */

@@ -57,10 +57,13 @@ export interface Config {
     allowDraftPRs: boolean;
     stallMinutes: number;
     maxRunMinutes: number;
+    /** Don't start another worker while the computer has less free memory than this (one always runs). */
+    minFreeMemoryMB: number;
   };
   agents: Record<AgentId, AgentSettings>;
   repos: RepoConfig[];
-  github: { enabled: boolean; pollSeconds: number };
+  /** reviewBots: code-review bots whose comments on a worker's own PR are passed to that worker. */
+  github: { enabled: boolean; pollSeconds: number; reviewBots: string[] };
   telegram: { enabled: boolean; botToken: string; chats: TelegramChat[]; allowUsers: string[] };
   /** Natural-language policies for the router's semantic (slow-path) filter. */
   policies: string;
@@ -83,6 +86,7 @@ export function defaultConfig(): Config {
       allowDraftPRs: true,
       stallMinutes: 20,
       maxRunMinutes: 120,
+      minFreeMemoryMB: 400,
     },
     agents: {
       claude: { enabled: true, model: '' },
@@ -91,7 +95,11 @@ export function defaultConfig(): Config {
       cursor: { enabled: true, model: '' },
     },
     repos: [],
-    github: { enabled: true, pollSeconds: 45 },
+    github: {
+      enabled: true,
+      pollSeconds: 45,
+      reviewBots: ['chatgpt-codex-connector', 'coderabbitai', 'copilot-pull-request-reviewer', 'gemini-code-assist', 'devin-ai-integration', 'cubic-dev-ai', 'codeant-ai'],
+    },
     telegram: { enabled: false, botToken: '', chats: [], allowUsers: [] },
     policies: DEFAULT_POLICIES,
     watchdog: { enabled: true, llmChecks: true, checkMinutes: 20 },
@@ -135,7 +143,24 @@ export function loadConfig(): Config {
   }
   const cfg = merge(defaultConfig(), raw);
   cfg.repos = (cfg.repos ?? []).map(normalizeRepo);
+  // A hand-edited or older file with a bad number must not stall the service (maxConcurrent 0, …).
+  const defaults = defaultConfig();
+  for (const [key, rule] of Object.entries(RULES)) {
+    if (rule.kind !== 'number' || key.includes('*') || !check(key, rule, getKey(cfg, key))) continue;
+    setKey(cfg, key, getKey(defaults, key));
+  }
   return cfg;
+}
+
+function getKey(obj: unknown, key: string): unknown {
+  return key.split('.').reduce<any>((o, k) => (o == null ? undefined : o[k]), obj);
+}
+
+function setKey(obj: any, key: string, value: unknown): void {
+  const parts = key.split('.');
+  const last = parts.pop()!;
+  const parent = parts.reduce<any>((o, k) => (o[k] ??= {}), obj);
+  parent[last] = value;
 }
 
 export function saveConfig(cfg: Config): void {
@@ -172,14 +197,120 @@ export function publicConfig(cfg: Config): Config {
   return copy;
 }
 
-/** Apply a patch coming from the UI. A masked token means "unchanged". */
+type Rule =
+  | { kind: 'number'; min: number; max: number; int?: boolean }
+  | { kind: 'boolean' }
+  | { kind: 'string'; nonEmpty?: boolean }
+  | { kind: 'enum'; values: readonly string[] }
+  | { kind: 'strings' }
+  | { kind: 'array' };
+
+const AGENT_CHOICES = [...AGENT_IDS, 'mock'] as const;
+
+/** Every setting a person or agent may change, with what it accepts. `*` matches one agent id. */
+const RULES: Record<string, Rule> = {
+  port: { kind: 'number', min: 1024, max: 65535, int: true },
+  mention: { kind: 'string', nonEmpty: true },
+  policies: { kind: 'string' },
+  'router.agent': { kind: 'enum', values: AGENT_CHOICES },
+  'router.model': { kind: 'string' },
+  'router.maxBatch': { kind: 'number', min: 1, max: 100, int: true },
+  'router.rotateAfterTurns': { kind: 'number', min: 1, max: 10_000, int: true },
+  'router.leaseMinutes': { kind: 'number', min: 0.01, max: 24 * 60 },
+  'workers.defaultAgent': { kind: 'enum', values: AGENT_CHOICES },
+  'workers.maxConcurrent': { kind: 'number', min: 1, max: 16, int: true },
+  'workers.autonomy': { kind: 'enum', values: ['full', 'safe'] },
+  'workers.allowDraftPRs': { kind: 'boolean' },
+  'workers.stallMinutes': { kind: 'number', min: 1, max: 24 * 60 },
+  'workers.maxRunMinutes': { kind: 'number', min: 1, max: 7 * 24 * 60 },
+  'workers.minFreeMemoryMB': { kind: 'number', min: 0, max: 1_000_000, int: true },
+  'agents.*.enabled': { kind: 'boolean' },
+  'agents.*.model': { kind: 'string' },
+  repos: { kind: 'array' },
+  'github.enabled': { kind: 'boolean' },
+  'github.pollSeconds': { kind: 'number', min: 15, max: 24 * 3600, int: true },
+  'github.reviewBots': { kind: 'strings' },
+  'telegram.enabled': { kind: 'boolean' },
+  'telegram.botToken': { kind: 'string' },
+  'telegram.chats': { kind: 'array' },
+  'telegram.allowUsers': { kind: 'strings' },
+  'watchdog.enabled': { kind: 'boolean' },
+  'watchdog.llmChecks': { kind: 'boolean' },
+  'watchdog.checkMinutes': { kind: 'number', min: 1, max: 24 * 60 },
+};
+
+function ruleFor(key: string): Rule | undefined {
+  if (RULES[key]) return RULES[key];
+  const m = key.match(/^agents\.([^.]+)\.(\w+)$/);
+  return m && (AGENT_IDS as readonly string[]).includes(m[1]) ? RULES[`agents.*.${m[2]}`] : undefined;
+}
+
+/** Setting names in a patch that don't exist (typos like "workers.maxConcurent"). */
+export function unknownKeys(patch: unknown, prefix = ''): string[] {
+  if (!isObject(patch)) return [];
+  const out: string[] = [];
+  for (const [k, v] of Object.entries(patch)) {
+    const key = prefix ? `${prefix}.${k}` : k;
+    if (ruleFor(key)) continue;
+    const isBranch = Object.keys(RULES).some((r) => r.startsWith(`${key}.`)) || /^agents(\.[^.]+)?$/.test(key);
+    if (isBranch && isObject(v)) out.push(...unknownKeys(v, key));
+    else out.push(key);
+  }
+  return out;
+}
+
+function check(key: string, rule: Rule, v: unknown): string | null {
+  switch (rule.kind) {
+    case 'number': {
+      const n = typeof v === 'number' ? v : NaN;
+      if (!Number.isFinite(n) || n < rule.min || n > rule.max || (rule.int && !Number.isInteger(n))) {
+        return `${key} must be ${rule.int ? 'a whole number' : 'a number'} from ${rule.min} to ${rule.max} (got ${JSON.stringify(v)})`;
+      }
+      return null;
+    }
+    case 'boolean':
+      return typeof v === 'boolean' ? null : `${key} must be true or false (got ${JSON.stringify(v)})`;
+    case 'string':
+      return typeof v !== 'string' ? `${key} must be text` : rule.nonEmpty && !v.trim() ? `${key} can't be empty` : null;
+    case 'enum':
+      return rule.values.includes(v as string) ? null : `${key} must be one of ${rule.values.join(', ')} (got ${JSON.stringify(v)})`;
+    case 'strings':
+      return Array.isArray(v) && v.every((x) => typeof x === 'string') ? null : `${key} must be a list of names, e.g. '["alice","bob"]'`;
+    case 'array':
+      return Array.isArray(v) ? null : `${key} must be a list`;
+  }
+}
+
+/** Problems with a whole config, one message per bad setting. */
+export function validateConfig(cfg: Config): string[] {
+  const errors: string[] = [];
+  const get = (key: string) => key.split('.').reduce<any>((o, k) => (o == null ? undefined : o[k]), cfg);
+  for (const [key, rule] of Object.entries(RULES)) {
+    if (key.includes('*')) {
+      for (const id of AGENT_IDS) {
+        const k = key.replace('*', id);
+        const v = get(k);
+        if (v !== undefined) {
+          const e = check(k, rule, v);
+          if (e) errors.push(e);
+        }
+      }
+      continue;
+    }
+    const e = check(key, rule, get(key));
+    if (e) errors.push(e);
+  }
+  return errors;
+}
+
+/** Apply a change from the CLI or an agent. Unknown settings and bad values are refused, not guessed. */
 export function applyConfigPatch(cfg: Config, patch: unknown): Config {
+  const unknown = unknownKeys(patch);
+  if (unknown.length) throw new Error(`Unknown setting${unknown.length > 1 ? 's' : ''}: ${unknown.join(', ')}. See \`superagent config\` for all settings.`);
   const next = merge(cfg, patch);
   if (next.telegram.botToken.startsWith('••••')) next.telegram.botToken = cfg.telegram.botToken;
   next.repos = (next.repos ?? []).map(normalizeRepo);
-  next.workers.maxConcurrent = Math.max(1, Math.min(16, Math.round(Number(next.workers.maxConcurrent) || 3)));
-  next.github.pollSeconds = Math.max(15, Math.round(Number(next.github.pollSeconds) || 45));
-  const lease = Number(next.router.leaseMinutes);
-  next.router.leaseMinutes = Number.isFinite(lease) && lease > 0 ? Math.min(lease, 24 * 60) : 15;
+  const errors = validateConfig(next);
+  if (errors.length) throw new Error(errors.join('; '));
   return next;
 }

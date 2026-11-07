@@ -323,13 +323,14 @@ export class Store {
     reply_thread_id?: number | null;
     origin_trigger_id?: number | null;
     silent?: boolean;
+    base?: string | null;
     created_by: string;
   }): WorkerRow {
     const now = Date.now();
     const { id } = this.run(
-      `INSERT INTO workers (title, task, agent, model, repo, status, reply_thread_id, origin_trigger_id, silent, created_by, created_at, updated_at, last_activity_at)
-       VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)`,
-      w.title, w.task, w.agent, w.model ?? null, w.repo ?? null, w.reply_thread_id ?? null, w.origin_trigger_id ?? null,
+      `INSERT INTO workers (title, task, agent, model, repo, base, status, reply_thread_id, origin_trigger_id, silent, created_by, created_at, updated_at, last_activity_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)`,
+      w.title, w.task, w.agent, w.model ?? null, w.repo ?? null, w.base ?? null, w.reply_thread_id ?? null, w.origin_trigger_id ?? null,
       w.silent ? 1 : 0, w.created_by, now, now, now,
     );
     return this.workerById(id)!;

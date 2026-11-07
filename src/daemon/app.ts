@@ -14,6 +14,8 @@ export class App {
   readonly store: Store;
   readonly token: string;
   readonly startedAt = Date.now();
+  /** The port the server listens on; a `port` change in the config applies on the next start. */
+  listenPort = 0;
   config: Config;
   agents: AgentInfo[] = [];
   /** Settles once the first agent detection is done (the server answers before that). */

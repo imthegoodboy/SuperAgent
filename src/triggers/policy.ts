@@ -20,6 +20,8 @@ export interface PolicyInput {
   informational?: boolean;
   /** A reason computed by the source itself (e.g. unknown Telegram chat). */
   dropReason?: string;
+  /** A code-review bot the user listed (github.reviewBots): its comments reach a worker that follows the PR. */
+  reviewBot?: boolean;
 }
 
 /**
@@ -39,6 +41,8 @@ export function decide(ev: PolicyInput, subscriberCount: number): { decision: De
   if (ev.dropReason) return { decision: 'dropped', reason: ev.dropReason };
   if (ev.text.includes(SELF_MARKER)) return { decision: 'dropped', reason: 'posted by SuperAgent' };
   if (ev.mode === 'off') return { decision: 'dropped', reason: 'source is turned off' };
+  // A worker waiting for an AI review of its own PR must get it, although bots never trigger work.
+  if (ev.reviewBot && subscriberCount > 0) return { decision: 'pass_through', reason: 'review bot on a followed thread' };
   if (ev.isBot && ev.kind !== 'ci') return { decision: 'dropped', reason: 'bot account' };
 
   const allow = (ev.allowUsers ?? []).map((u) => u.toLowerCase());

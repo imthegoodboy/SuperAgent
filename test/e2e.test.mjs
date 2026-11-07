@@ -298,6 +298,108 @@ test('`tell --now` interrupts a running worker and resumes it with the message',
   assert.equal(later.interrupted, false, 'nothing to interrupt: it is simply queued');
 });
 
+test('B1: a worker whose setup fails does not loop when it gets a message', async () => {
+  await call('POST', '/api/router/attach', { take: true });
+  const cfg = await call('GET', '/api/config');
+  await call('PUT', '/api/config', { repos: [...cfg.repos, { name: 'gone', path: path.join(home, 'no-such-folder'), mode: 'off' }] });
+  const d = await act({ type: 'dispatch', task: 'work in a repo that moved', repo: 'gone' });
+  await until(async () => (await worker(d.worker)).status === 'failed');
+  await act({ type: 'message_worker', worker: d.worker, text: 'try again' });
+  await new Promise((r) => setTimeout(r, 1500));
+  const { logs } = await call('GET', `/api/workers/${d.worker.slice(2)}`);
+  const starts = logs.filter((l) => l.kind === 'error').length;
+  assert.ok(starts <= 2, `${starts} failed starts: it must not restart in a loop`);
+  assert.ok(logs.some((l) => /not delivered because the worker could not start/.test(l.text)));
+  assert.ok((await fetch(`http://127.0.0.1:${port}/api/health`)).ok, 'the service still answers');
+});
+
+test('B7: dispatch says when a worker is only queued; recall fails for unknown ids', async () => {
+  await call('POST', '/api/router/attach', { take: true });
+  const a = await act({ type: 'dispatch', task: 'SLOW: one', title: 'Slow one' });
+  const b = await act({ type: 'dispatch', task: 'SLOW: two', title: 'Slow two' });
+  const c = await act({ type: 'dispatch', task: 'third', title: 'Third' });
+  assert.equal(c.status, 'queued', 'both slots are busy');
+  assert.equal(c.max, 2);
+  for (const w of [a, b, c]) await act({ type: 'stop_worker', worker: w.worker });
+  const r = sa(['recall', 'W#999']);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /Not found: W#999/);
+});
+
+test('B9: a take-over hands the previous session’s unhandled events on', async () => {
+  await call('POST', '/api/router/attach', { take: true }, 'old');
+  await call('GET', '/api/router/events', undefined, 'old');
+  const ws = (await call('GET', '/api/workers')).find((w) => w.status === 'stopped');
+  await call('POST', '/api/watchdog/action', { type: 'stop_worker', worker: ws.id, note: 'handover check' });
+  const given = (await call('GET', '/api/router/events', undefined, 'old')).events.find((e) => e.source === 'watchdog');
+  assert.ok(given, 'the old session got the alert');
+  await call('POST', '/api/router/attach', { take: true }, 'new');
+  const ev = await call('GET', '/api/router/events', undefined, 'new');
+  assert.ok(ev.events.some((e) => e.id === given.id), 'the new session gets it again');
+  await call('POST', '/api/router/detach', {}, 'new');
+});
+
+test('B5/B6: the CLI validates settings and never eats text that looks like an option', async () => {
+  const bad = sa(['config', 'set', 'workers.maxConcurrent', '0']);
+  assert.equal(bad.status, 1);
+  assert.match(bad.stderr, /workers.maxConcurrent must be a whole number from 1 to 16/);
+  assert.match(sa(['config', 'set', 'nonsense.key', '5']).stderr, /Unknown setting: nonsense/);
+  const typo = sa(['workers', '--agnet', 'codex']);
+  assert.equal(typo.status, 1);
+  assert.match(typo.stderr, /Unknown option '--agnet'/);
+  assert.equal(sa(['remember', '--json output is easier to parse']).status, 0);
+  assert.equal(sa(['remember', '--', '-h', 'prints', 'the', 'help']).status, 0);
+  const mem = sa(['memory']).stdout;
+  assert.match(mem, /--json output is easier to parse/);
+  assert.match(mem, /-h prints the help/);
+});
+
+test('B2: changing the port while running keeps the CLI connected, and a second service is refused', async () => {
+  const moved = sa(['config', 'set', 'port', String(port + 1)]);
+  assert.equal(moved.status, 0, moved.stderr);
+  assert.match(moved.stdout, /keeps its port until `superagent restart`/);
+  const st = sa(['status']);
+  assert.match(st.stdout, /SuperAgent v/, 'the CLI still finds the running service');
+  const second = spawnSync(process.execPath, [cli, '__daemon'], { env: { ...env, SUPERAGENT_MOCK: '1' }, encoding: 'utf8', timeout: 30_000 });
+  assert.equal(second.status, 4, 'a second service for the same data folder exits');
+  assert.match(second.stdout + second.stderr, /already runs for this data folder/);
+  assert.equal(sa(['config', 'set', 'port', String(port)]).status, 0);
+});
+
+test('--base starts a worker from another branch', async () => {
+  const repoDir = path.join(home, 'based-repo');
+  fs.mkdirSync(repoDir);
+  const git = (...a) => execFileSync('git', ['-C', repoDir, '-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { stdio: 'pipe' }).toString().trim();
+  git('init', '-q', '-b', 'main');
+  git('commit', '-q', '--allow-empty', '-m', 'init');
+  git('checkout', '-q', '-b', 'feature');
+  git('commit', '-q', '--allow-empty', '-m', 'feature work');
+  git('checkout', '-q', 'main');
+  const cfg = await call('GET', '/api/config');
+  await call('PUT', '/api/config', { repos: [...cfg.repos, { name: 'based', path: repoDir, mode: 'off' }] });
+  await call('POST', '/api/router/attach', { take: true });
+  const d = await act({ type: 'dispatch', task: 'continue the feature', repo: 'based', base: 'feature' });
+  const w = await until(async () => {
+    const x = await worker(d.worker);
+    return x.status === 'done' ? x : null;
+  });
+  assert.equal(w.base, 'feature');
+  assert.equal(git('rev-parse', w.branch), git('rev-parse', 'feature'), 'the worker branch starts at the feature branch');
+  const wrong = await act({ type: 'dispatch', task: 'x', repo: 'based', base: 'no-such-branch' });
+  const failed = await until(async () => {
+    const x = await worker(wrong.worker);
+    return x.status === 'failed' ? x : null;
+  });
+  assert.match(failed.error, /base "no-such-branch" is not a branch or commit/);
+});
+
+test('cleanup archives finished workers', async () => {
+  const r = sa(['cleanup', '--days', '0']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /Archived W#/);
+  assert.ok(!(await call('GET', '/api/workers')).some((w) => ['done', 'failed', 'stopped'].includes(w.status)));
+});
+
 test('the CLI drives the router: attach, dispatch, events, graph, recall', async () => {
   const attach = sa(['router', 'attach', '--take']);
   assert.equal(attach.status, 0, attach.stderr);

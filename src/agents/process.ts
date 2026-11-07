@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 
 const IS_WIN = process.platform === 'win32';
 
@@ -140,9 +141,11 @@ export function startProcess(resolved: Resolved, opts: ProcOptions): ProcHandle 
   let timedOut = false;
   let spawnError: string | undefined;
   const bufs = { stdout: '', stderr: '' };
+  // One decoder per stream: a character split across two chunks (emoji, Hindi, …) stays whole.
+  const decoders = { stdout: new StringDecoder('utf8'), stderr: new StringDecoder('utf8') };
 
   const feed = (stream: 'stdout' | 'stderr', chunk: Buffer) => {
-    const s = chunk.toString('utf8');
+    const s = decoders[stream].write(chunk);
     if (stream === 'stdout') stdout = (stdout + s).slice(-KEEP);
     else stderr = (stderr + s).slice(-KEEP);
     bufs[stream] += s;
@@ -186,6 +189,16 @@ export function startProcess(resolved: Resolved, opts: ProcOptions): ProcHandle 
       setTimeout(() => settle(null), 1000);
     });
     child.on('close', (code) => settle(code));
+    // A run is over when the process exits, even if something it started (a dev server) still holds
+    // the output pipe open, which would otherwise keep the run, and its slot, busy forever.
+    child.on('exit', (code) => {
+      setTimeout(() => {
+        if (settled) return;
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        settle(code);
+      }, 5000).unref();
+    });
   });
 
   return { pid: child.pid, done, kill };
@@ -206,6 +219,15 @@ export function killTree(pid: number | undefined | null): void {
   } catch {
     /* already gone */
   }
+}
+
+/** The command line of a running process ('' if it can't be read), to check a pid is still ours. */
+export async function commandLine(pid: number): Promise<string> {
+  const r =
+    process.platform === 'win32'
+      ? await run('powershell', ['-NoProfile', '-NonInteractive', '-Command', `(Get-CimInstance Win32_Process -Filter "ProcessId=${Math.trunc(pid)}").CommandLine`], { timeoutMs: 20_000 })
+      : await run('ps', ['-o', 'args=', '-p', String(Math.trunc(pid))], { timeoutMs: 10_000 });
+  return r.code === 0 ? r.stdout.trim() : '';
 }
 
 export function isAlive(pid: number | null | undefined): boolean {

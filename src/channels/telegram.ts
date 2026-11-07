@@ -3,6 +3,20 @@ import { emit, log, sleep } from '../core/util.js';
 import { mentions } from '../triggers/policy.js';
 
 /** Optional IM channel. Uses a bot token the user creates with @BotFather; long-polls getUpdates. */
+/**
+ * Who sent a Telegram message, and whether they are on the allowlist. Only the username or the numeric
+ * id identify someone: a display name can be set to anything, an allowed username included, so it is
+ * shown but never trusted.
+ */
+export function telegramSender(from: any, allowUsers: string[]): { author: string; username: string | null; allowed: boolean } {
+  const username = from?.username ? String(from.username) : null;
+  const userId = from?.id !== undefined && from?.id !== null ? String(from.id) : null;
+  const author = username ?? `${from?.first_name ?? 'unknown'} (id ${userId ?? '?'})`;
+  const allow = allowUsers.map((u) => u.replace(/^@/, '').toLowerCase());
+  const allowed = (!!username && allow.includes(username.toLowerCase())) || (!!userId && allow.includes(userId));
+  return { author, username, allowed };
+}
+
 export class TelegramSource {
   private abort: AbortController | null = null;
   private offset = 0;
@@ -76,14 +90,16 @@ export class TelegramSource {
     const cfg = this.app.config.telegram;
     const chatId = String(msg.chat.id);
     const isPrivate = msg.chat.type === 'private';
-    const author = msg.from?.username ?? msg.from?.first_name ?? 'unknown';
+    const { author, username, allowed: userAllowed } = telegramSender(msg.from, cfg.allowUsers);
+    const allow = cfg.allowUsers;
     const chat = cfg.chats.find((c) => c.id === chatId);
-    const userAllowed = cfg.allowUsers.map((u) => u.toLowerCase()).includes(String(author).toLowerCase());
     let mode = chat?.mode;
     let dropReason: string | undefined;
+    if (msg.from?.is_bot) dropReason = 'bot account';
+    else if (!isPrivate && allow.length && !userAllowed) dropReason = `${username ? '@' + username : author} is not on the allowlist`;
     if (!mode) {
       if (isPrivate && userAllowed) mode = 'all';
-      else dropReason = `unknown chat ${chatId} (${msg.chat.title ?? '@' + author}); add it with \`superagent config set telegram.chats '[{"id":"${chatId}","mode":"mentions"}]'\` (keep any chats already listed)`;
+      else dropReason ??= `unknown chat ${chatId} (${msg.chat.title ?? '@' + author}); add it with \`superagent config set telegram.chats '[{"id":"${chatId}","mode":"mentions"}]'\` (keep any chats already listed)`;
     }
     const mentioned =
       isPrivate ||
@@ -101,7 +117,8 @@ export class TelegramSource {
       text: msg.text,
       createdAt: msg.date * 1000,
       meta: { chatId, messageId: msg.message_id },
-      policy: { mode, allowUsers: isPrivate ? [] : cfg.allowUsers, mentioned, dropReason },
+      // The allowlist was applied above, by username or id; the policy must not compare display names.
+      policy: { mode, allowUsers: [], mentioned, dropReason },
     });
   }
 

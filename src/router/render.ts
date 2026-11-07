@@ -139,7 +139,15 @@ export function renderTurn(app: App, batch: TriggerRow[], fyi: TriggerRow[], not
 
 function activeWorkers(app: App): string {
   const active = app.store.workersWithStatus('queued', 'running', 'waiting').filter((w) => !w.archived);
-  return ['[ACTIVE WORKERS]', ...(active.length ? active.map((w) => `- ${workerBrief(app, w)}`) : ['- none'])].join('\n');
+  // Running and queued first, then the newest waiting ones; the rest are a count, to keep context small.
+  const order = (w: WorkerRow) => (w.status === 'waiting' ? 1 : 0);
+  const shown = [...active].sort((a, b) => order(a) - order(b) || b.id - a.id).slice(0, 15);
+  const more = active.length - shown.length;
+  return [
+    '[ACTIVE WORKERS]',
+    ...(active.length ? shown.map((w) => `- ${workerBrief(app, w)}`) : ['- none']),
+    ...(more > 0 ? [`- … and ${more} more waiting (superagent workers)`] : []),
+  ].join('\n');
 }
 
 // ---------- attached agent (the CLI router) ----------

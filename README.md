@@ -125,6 +125,7 @@ superagent config set workers.defaultAgent codex    # agent used when you don't 
 superagent config set workers.autonomy safe         # use each agent's own sandbox and approvals
 superagent config set workers.allowDraftPRs false   # workers commit locally, no PRs
 superagent config set router.model sonnet           # model for the background router (default haiku)
+superagent config set workers.minFreeMemoryMB 600   # wait to start more workers below this free memory
 superagent config                                   # show everything
 ```
 
@@ -152,6 +153,7 @@ Your agent uses these through the skill. You can run them yourself too.
 | `superagent logs W#4 -f` | Follow a worker live |
 | `superagent tell W#4 "<text>"` | Give a worker more instructions |
 | `superagent cancel W#4` · `retry W#4` | Stop a worker, or run it again |
+| `superagent cleanup` | Archive workers that finished more than a week ago |
 | `superagent graph` | Who is working on what |
 | `superagent remember "<fact>"` | Remember something for every future session |
 | `superagent status` · `doctor` | Check that everything is running |
@@ -179,7 +181,8 @@ Every command accepts `--json`.
 
 | Problem | Try |
 |---|---|
-| Something isn't working | `superagent doctor` |
+| Something isn't working | `superagent doctor` (also checks each agent is signed in) |
+| Changed `port` | `superagent restart`; until then the service keeps its old port |
 | A worker seems stuck | `superagent logs W#4`, then `superagent retry W#4` |
 | Just upgraded | `superagent restart`, so the background service runs the new version |
 | GitHub events don't arrive | `gh auth status`; check `superagent activity` to see why an event was skipped |
