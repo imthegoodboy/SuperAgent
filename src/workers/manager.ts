@@ -280,6 +280,8 @@ export class WorkerManager {
     if (report) {
       status = report.status === 'needs_input' ? 'waiting' : report.status;
       summary = report.summary || snippet(res.finalText, 600);
+      // Keep the question on the worker itself so the app, `tasks` and `logs` can show it.
+      if (report.question) summary = `${summary}\n\n**Question:** ${report.question}`;
     } else if (res.error) {
       status = 'failed';
       error = res.error;
@@ -307,6 +309,7 @@ export class WorkerManager {
     if (pr && pr !== w.pr_url) this.followPr(id, pr);
     const endLog = store.addLog(id, runId, status === 'failed' ? 'error' : 'system', `Run finished: ${status}${error ? ` · ${snippet(error, 300)}` : ''}`);
     emit('worker_log', endLog);
+    if (report?.question) emit('worker_log', store.addLog(id, runId, 'inbox', `Question for you: ${report.question}`));
     this.report(id, report?.status ?? (error ? 'failed' : 'done'), summary, pr, report?.question ?? null, error);
     const line =
       status === 'waiting' ? `${ref.W(id)} needs your input: ${w.title}` : `${status === 'done' ? 'Finished' : 'Failed'} ${ref.W(id)}: ${w.title}`;

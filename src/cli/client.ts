@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { loadConfig } from '../core/config.js';
-import { paths } from '../core/paths.js';
+import { HOME_ID, paths } from '../core/paths.js';
 
 export function baseUrl(): string {
   return `http://127.0.0.1:${loadConfig().port}`;
@@ -19,7 +19,8 @@ export async function health(timeoutMs = 2000): Promise<{ ok: boolean; version: 
     const res = await fetch(`${baseUrl()}/api/health`, { signal: AbortSignal.timeout(timeoutMs) });
     if (!res.ok) return null;
     const j: any = await res.json();
-    return j?.name === 'superagent' ? j : null;
+    // Only the daemon serving *this* data folder counts (another SUPERAGENT_HOME may own the port).
+    return j?.name === 'superagent' && (!j.home || j.home === HOME_ID) ? j : null;
   } catch {
     return null;
   }

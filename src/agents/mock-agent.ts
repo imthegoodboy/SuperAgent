@@ -52,9 +52,9 @@ function parseEvents(input: string): Ev[] {
 async function main(): Promise<void> {
   const input = await readStdin();
   out({ type: 'system', subtype: 'init', session_id: session });
-  await new Promise((r) => setTimeout(r, delay));
 
   if (mode === 'router') {
+    await new Promise((r) => setTimeout(r, delay));
     const actions: any[] = [];
     for (const ev of parseEvents(input)) {
       if (ev.label === 'REPORT') {
@@ -87,7 +87,10 @@ async function main(): Promise<void> {
     out({ type: 'result', subtype: 'error', is_error: true, session_id: session, result: 'mock failure' });
     process.exit(1);
   }
-  const report = { status: 'done', summary: `Mock finished: ${title}` };
+  // A task containing "ASK:" makes the mock stop and ask the human a question.
+  const report = /\bASK:/.test(input)
+    ? { status: 'needs_input', summary: 'Need a decision before going on.', question: 'Which database should I use?' }
+    : { status: 'done', summary: `Mock finished: ${title}` };
   out({
     type: 'result',
     subtype: 'success',

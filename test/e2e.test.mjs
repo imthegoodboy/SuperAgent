@@ -96,6 +96,20 @@ test('chat message is answered by the router', async () => {
   assert.equal(reply.text, 'Echo: hello there');
 });
 
+test('`superagent say` prints the reply and exits right away', async () => {
+  const started = Date.now();
+  const out = await new Promise((resolve, reject) => {
+    const p = spawn(process.execPath, [path.join(root, 'dist', 'cli.js'), 'say', 'are you there?'], {
+      env: { ...process.env, SUPERAGENT_HOME: home, NO_COLOR: '1' },
+    });
+    let text = '';
+    p.stdout.on('data', (c) => (text += c));
+    p.on('close', (code) => (code === 0 ? resolve(text) : reject(new Error(`exit ${code}: ${text}`))));
+  });
+  assert.match(out, /Echo: are you there\?/);
+  assert.ok(Date.now() - started < 30_000, `took ${Date.now() - started}ms`);
+});
+
 test('router dispatches a worker, worker reports back, router relays the result', async () => {
   const { message } = await call('POST', '/api/messages', { text: 'task: write the mock file' });
   const worker = await until(async () => (await call('GET', '/api/workers')).find((w) => w.title.includes('write the mock file')));
@@ -131,6 +145,16 @@ test('direct task in a git repo runs in its own worktree and branch', async () =
   assert.ok(!fs.existsSync(path.join(repoDir, 'mock-output.txt')), 'main checkout untouched');
   await call('POST', `/api/workers/${w.id}/archive`);
   assert.ok(!fs.existsSync(done.cwd), 'archive removes the worktree');
+});
+
+test('a worker that needs input waits, and its question is on the worker', async () => {
+  const w = await call('POST', '/api/workers', { task: 'ASK: set up storage' });
+  const d = await until(async () => {
+    const x = await call('GET', `/api/workers/${w.id}`);
+    return x.worker.status === 'waiting' ? x : null;
+  });
+  assert.match(d.worker.summary, /Which database should I use\?/);
+  assert.ok(d.logs.some((l) => l.kind === 'inbox' && l.text.includes('Which database')), 'question shows in the log');
 });
 
 test('messages to a finished worker resume it (pass-through inbox)', async () => {

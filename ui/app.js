@@ -35,13 +35,16 @@ clear(
   view,
 );
 
+let isLocked = false;
+
 function renderFoot() {
   const r = state.router;
   const running = activeWorkers().filter((w) => w.status === 'running').length;
   const waiting = activeWorkers().filter((w) => w.status === 'waiting').length;
+  const connText = isLocked ? 'Not connected' : state.connected ? 'Running locally' : 'Reconnecting…';
   clear(
     foot,
-    h('div', { class: `conn ${state.connected ? 'on' : 'off'}` }, h('span', { class: 'dot' }), state.connected ? 'Running locally' : 'Reconnecting…'),
+    h('div', { class: `conn ${state.connected ? 'on' : 'off'}` }, h('span', { class: 'dot' }), connText),
     state.connected && r
       ? h('div', { class: 'foot-line' }, icon('router', 14), r.busy ? 'Router is thinking' : r.lastError ? 'Router hit an error' : 'Router is idle')
       : null,
@@ -76,6 +79,8 @@ function message(title, ...body) {
 }
 
 function locked() {
+  isLocked = true;
+  renderFoot();
   message('Open SuperAgent from the app', [
     'This page needs your local access key. Open SuperAgent from the desktop app, or run ',
     h('code', {}, 'superagent open'),
