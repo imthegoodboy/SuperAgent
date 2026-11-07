@@ -133,6 +133,16 @@ test('direct task in a git repo runs in its own worktree and branch', async () =
   assert.ok(!fs.existsSync(done.cwd), 'archive removes the worktree');
 });
 
+test('a worker that needs input waits, and its question is on the worker', async () => {
+  const w = await call('POST', '/api/workers', { task: 'ASK: set up storage' });
+  const d = await until(async () => {
+    const x = await call('GET', `/api/workers/${w.id}`);
+    return x.worker.status === 'waiting' ? x : null;
+  });
+  assert.match(d.worker.summary, /Which database should I use\?/);
+  assert.ok(d.logs.some((l) => l.kind === 'inbox' && l.text.includes('Which database')), 'question shows in the log');
+});
+
 test('messages to a finished worker resume it (pass-through inbox)', async () => {
   const w = await call('POST', '/api/workers', { task: 'first job' });
   const describe = async () => {

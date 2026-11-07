@@ -87,7 +87,10 @@ async function main(): Promise<void> {
     out({ type: 'result', subtype: 'error', is_error: true, session_id: session, result: 'mock failure' });
     process.exit(1);
   }
-  const report = { status: 'done', summary: `Mock finished: ${title}` };
+  // A task containing "ASK:" makes the mock stop and ask the human a question.
+  const report = /\bASK:/.test(input)
+    ? { status: 'needs_input', summary: 'Need a decision before going on.', question: 'Which database should I use?' }
+    : { status: 'done', summary: `Mock finished: ${title}` };
   out({
     type: 'result',
     subtype: 'success',
