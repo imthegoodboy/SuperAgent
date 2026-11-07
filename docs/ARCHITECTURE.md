@@ -2,8 +2,10 @@
 
 SuperAgent implements the Super-agent design described by the DeepSeek Harness team in
 [*Exploring Super-agent Design: Towards a More Autonomous Agent System*](https://x.com/DeepSeekHarness/status/2116857257245987236),
-adapted to run on one personal computer with the coding agents you already use. This document maps
-each part of that design to the code and notes where SuperAgent differs.
+adapted to run on one personal computer with the coding agents you already use. Like the article's own
+prototype, it is a plugin for existing harnesses, not a harness: a skill teaches Claude Code, Codex,
+OpenCode or Cursor to act as the router, and a background service provides everything a single session
+cannot. This document maps each part of the design to the code and notes where SuperAgent differs.
 
 A Super-agent should be **continuous** (one agent across every channel), **productive** (many tasks in
 parallel, new instructions accepted at any time), **proactive** (reacts to events, not only to typed
@@ -11,11 +13,13 @@ prompts) and **persistent** (stays up and recovers by itself). No single ReAct l
 they come from the system around the agents.
 
 ```
-             ┌──────────────────────────── daemon (node) ───────────────────────────┐
- triggers ──▶│ fast-path filter ──▶ router queue ──▶ Router session (LLM, no tools) │──▶ replies
- (chat, gh,  │        │  pass-through                         │ dispatch / message   │   (chat, gh,
-  telegram)  │        ▼                                       ▼                      │    telegram)
-             │   worker inbox ──────────────────▶ Workers (Claude Code / Codex /     │
+   you ⇄ your agent (Claude Code / Codex / …) with the superagent skill = the ROUTER
+                 │ superagent events · dispatch · tell · reply · recall …  (CLI → local HTTP API)
+             ┌───▼────────────────────────── daemon (node) ───────────────────────────┐
+ triggers ──▶│ fast-path filter ──▶ router queue ──▶ attached agent, or the background│──▶ replies
+ (github,    │        │  pass-through                 router (LLM, no tools) when    │   (github,
+  telegram,  │        ▼                               no agent is attached           │    telegram)
+  reports)   │   worker inbox ──────────────────▶ Workers (Claude Code / Codex /     │
              │                                    OpenCode / Cursor, one worktree    │
              │                                    each) ──report──▶ router queue     │
              │                     SQLite: threads, triggers, workers, logs, turns   │
@@ -26,18 +30,30 @@ they come from the system around the agents.
 
 ## Two-level architecture (Section 2)
 
-**Router layer:** `src/router/router.ts`. One long-lived LLM session, resumed turn after turn through
-the agent CLI's own session mechanism (`claude -p --resume`, `codex exec resume`, …). It receives every
-event that needs a decision and answers with JSON **actions** only: `reply`, `dispatch`,
-`message_worker`, `stop_worker`, `subscribe`, `unsubscribe`, `recall`, `ignore`, `remember`. It
-gets no tools, so it can't drift into doing work itself; the design's own experiment found that
-single sessions with a subagent tool often do just that. With Claude Code (the default) the router
-runs with `--tools ""`; with the other agents it uses their most restricted mode (Codex `read-only`
-sandbox, OpenCode's `plan` agent, Cursor's `ask` mode). The router defaults to a small, fast model
-(`haiku`).
+**Router layer:** `src/router/router.ts`. Exactly one router decides at any moment. Every decision is
+one of a fixed set of **actions**: `reply`, `dispatch`, `message_worker`, `stop_worker`, `subscribe`,
+`unsubscribe`, `recall`, `ignore`, `remember`. The router can take two forms, and both share all
+state:
 
-**Batching:** while a router turn is running, new events queue in SQLite. The next turn takes all of
-them at once (`router.maxBatch`), so bursts are handled in one call (Section 2.1, 7.2).
+- **An attached agent session.** The user's own Claude Code, Codex, OpenCode or Cursor loads the skill
+  (`skill/superagent/SKILL.md`) and runs `superagent router attach`. It then reads `superagent events`
+  and acts with CLI commands that map one-to-one onto the actions (`dispatch`, `tell`, `cancel`,
+  `reply`, `ignore`, `recall`, `follow`, `remember`). The skill forbids it from doing task work itself:
+  the design's own experiment found that single sessions with a subagent tool often do just that.
+  It holds a **lease** (`router.lease` in the kv table) that every router command renews. It expires
+  after `router.leaseMinutes` (15) of quiet or on `router detach`. A second session can't attach
+  while the lease is held unless it passes `--take`.
+- **The background router**, used whenever no lease is held: one long-lived LLM session, resumed turn
+  after turn through the agent CLI's own session mechanism (`claude -p --resume`,
+  `codex exec resume`, …), answering with JSON actions only. It gets no tools: with Claude Code (the
+  default) it runs with `--tools ""`; with the other agents it uses their most restricted mode (Codex
+  `read-only` sandbox, OpenCode's `plan` agent, Cursor's `ask` mode). It defaults to a small, fast
+  model (`haiku`). When an agent attaches again, it gets a "while you were away" summary of what the
+  background router said and did.
+
+**Batching:** while a router turn is running, new events queue in SQLite. The next turn (or the next
+`superagent events`) takes all of them at once (`router.maxBatch`), so bursts are handled in one call
+(Section 2.1, 7.2).
 
 **Worker layer:** `src/workers/manager.ts`. Each worker is one task with an isolated context: a headless
 coding-agent session (`src/agents/adapters.ts`) running in its own git worktree and branch when the
@@ -53,10 +69,9 @@ Every input becomes a **trigger** in a **thread** (`src/triggers/ingest.ts`):
 
 | Source | Thread | Code |
 |---|---|---|
-| Local chat (app, CLI) | `local:chat` | `App.sendLocal` |
 | GitHub issue, PR, comment, review comment, review, CI run, close/merge | `github:owner/repo#N` | `src/channels/github.ts` polls through `gh api` |
 | Telegram message | `telegram:<chat>[:<topic>]` | `src/channels/telegram.ts` long-polls the Bot API |
-| Worker report | (none) | `WorkerManager.report` |
+| Worker report | (none; reports name their reply thread, by default the local thread with the user) | `WorkerManager.report` |
 | Watchdog alert | (none) | `/api/watchdog/action` |
 
 **Two-stage filtering (3.1):** `src/triggers/policy.ts` is the fast path: pure code, no model. It drops
@@ -69,8 +84,8 @@ staying silent.
 **Subscription and pass-through (3.2):** a worker subscribes to the GitHub threads of its task and to
 the PR it opens. New events on a subscribed thread skip the router and go into the worker's inbox; the
 worker is resumed with them. The router still sees a one-line FYI summary on its next turn, so its
-global picture stays current. Conversation threads (local chat, Telegram) are not subscribable; there
-the router relays with `message_worker`. A close or merge event releases the thread's subscribers.
+global picture stays current. Conversation threads (the local thread, Telegram) are not subscribable;
+there the router relays with `message_worker`. A close or merge event releases the thread's subscribers.
 
 **Inline & Spill, Chain of Recall (3.3):** `src/router/render.ts`. Each event is rendered with its ID,
 source, thread summary (event count, subscribed workers), the previous event in the thread, and the first
@@ -79,7 +94,8 @@ action returns full objects (`T#n` triggers, `TH#n` threads, `W#n` workers), and
 lists the IDs of related objects, so the router can follow references hop by hop (up to three hops per
 turn). When the router session is rotated (`router.rotateAfterTurns`) or recreated after an error, the
 next turn starts with a primer: configured repos, available agents, policies, long-term `remember`
-notes, recent chat, and recent workers.
+notes, recent messages, and recent workers. `superagent router attach` prints the same context for an
+attached agent.
 
 **Acting ahead (3.4):** the router can dispatch with `silent: true`. A silent worker's result is only
 announced if it reports `done`; otherwise it's dropped quietly. The default policy uses this for
@@ -87,11 +103,12 @@ announced if it reports `done`; otherwise it's dropped quietly. The default poli
 
 ## Full-duplex, multi-channel (Section 4)
 
-The router never waits for a worker: dispatching is fire-and-forget, and results come back later as
-report events. You can keep sending messages while workers run, and each one is handled on the next
-router turn. The router prompt sets per-channel style: concise markdown in the app, at most 100 words
-of plain text on Telegram, structured and complete on GitHub. Worker logs stay inside the worker view
-and never reach a channel.
+The router never waits for a worker: `dispatch` is the article's asynchronous `start()`. It returns at
+once, and results come back later as report events. `cancel` is its `stop()`. The user keeps talking to
+their agent while workers run. `superagent events --wait N` lets an idle agent wait for the next event.
+The router prompt and the skill set per-channel style: at most 100 words of plain text on Telegram,
+structured and complete on GitHub. Worker logs stay with the worker (`superagent logs`) and never reach
+a channel.
 
 ## Compute, state and environments (Section 5)
 
@@ -125,14 +142,25 @@ daemon). It:
 
 Every intervention is recorded and shown under Activity → Watchdog.
 
-## Local API and UI
+## The agent interface: skill, CLI, local API
 
-`src/daemon/server.ts` serves a JSON API, a Server-Sent Events stream (`/api/events`) and the static UI
-in `ui/`, on `127.0.0.1` only. Every API route except `/api/health` needs the token from
-`~/.superagent/token`. The page itself contains no secret: the desktop app and `superagent open` pass
-the token once as `?t=…`, and the page keeps it in local storage and removes it from the address bar.
-Requests with a foreign `Host` (DNS rebinding) or `Origin` (cross-site) are rejected. The desktop app
-(`desktop/`, Tauri) checks the health endpoint, runs `superagent start` if needed, and loads that page.
+SuperAgent has no UI of its own. Agents use it through:
+
+- **The skill** (`skill/superagent/SKILL.md`): when to use SuperAgent, the router loop, how to handle each
+  kind of event, how to brief a worker, and the rules. A global npm install copies it into every agent's
+  global skills folder (`scripts/postinstall.mjs`). Every CLI command checks again (`ensureIntegrations`
+  in `src/daemon/system.ts`), so agents installed later get it too, and an updated skill reaches the
+  folders that have it. `superagent uninstall` removes it.
+- **The CLI** (`src/cli/commands.ts`): plain text for the agent to read, or JSON with `--json`. Text
+  arguments given as `-` come from stdin. Router commands start the service on demand.
+- **The local API** (`src/daemon/server.ts`): a JSON API and a Server-Sent Events stream (`/api/events`)
+  on `127.0.0.1` only. Every route except `/api/health` needs the token from `~/.superagent/token`.
+  Requests with a foreign `Host` (DNS rebinding) or `Origin` (cross-site) are rejected. The router's
+  routes are `router/attach`, `router/detach`, `router/events?wait=`, `router/actions`, `recall` and
+  `graph`.
+
+Workers run with `SUPERAGENT_WORKER=W#n` in their environment, and the router commands refuse to run
+there, so a worker that loads the skill can't act as the router or start more workers.
 
 Text from GitHub and Telegram reaches models as quoted data: the router prompt says event text never
 overrides its rules, and worker prompts wrap it in `<external-content>` with the same instruction.
@@ -155,6 +183,10 @@ multi-line prompts. `src/agents/process.ts` reads each shim and launches the rea
 directly.
 
 ## Not built (yet)
+
+- **Pushing events into an open session.** An attached agent sees new events when it runs
+  `superagent events` (after each user message, or in a `--wait` loop). Agent hooks could insert them
+  automatically on every turn.
 
 - **Cloud execution and BYOM devices** (Section 5.2): SuperAgent runs on one machine by design.
 - **Sharding the router or direct worker-to-worker messages** (Section 8.1): one router plus

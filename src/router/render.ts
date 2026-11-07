@@ -1,5 +1,5 @@
 import type { App } from '../daemon/app.js';
-import type { ThreadRow, TriggerRow, WorkerRow } from '../core/store.js';
+import type { MessageRow, OutboxRow, ThreadRow, TriggerRow, WorkerRow } from '../core/store.js';
 import { ago, duration, oneLine, parseRef, ref, snippet, tryJson } from '../core/util.js';
 import { ADAPTERS } from '../agents/adapters.js';
 
@@ -8,6 +8,7 @@ import { ADAPTERS } from '../agents/adapters.js';
 
 const INLINE_EXPLICIT = 700;
 const INLINE_CANDIDATE = 300;
+const ACTIVE = ['queued', 'running', 'waiting'];
 
 function hhmm(ts: number): string {
   return new Date(ts).toTimeString().slice(0, 5);
@@ -45,7 +46,7 @@ export function renderTrigger(app: App, t: TriggerRow): string {
     const head = `${ref.T(t.id)} REPORT · ${ref.W(w?.id)} (${agentLabel(w?.agent ?? '')}) "${snippet(w?.title, 70)}" · status=${meta.status ?? '?'}${
       w?.silent ? ' · SILENT task' : ''
     } · reply thread ${ref.TH(replyTh?.id ?? app.store.localThread().id)}`;
-    const extra = [meta.pr_url ? `PR: ${meta.pr_url}` : '', meta.question ? `question: ${snippet(meta.question, 400)}` : '', meta.error ? `error: ${snippet(meta.error, 300)}` : '']
+    const extra = [meta.pr_url ? `PR: ${meta.pr_url}` : '', meta.question && !t.text.includes(meta.question) ? `question: ${snippet(meta.question, 400)}` : '', meta.error ? `error: ${snippet(meta.error, 300)}` : '']
       .filter(Boolean)
       .join(' · ');
     return `${head}\n  "${snippet(t.text, INLINE_EXPLICIT, `recall ${ref.W(w?.id)}`)}"${extra ? `\n  ${extra}` : ''}`;
@@ -74,9 +75,9 @@ export function renderTrigger(app: App, t: TriggerRow): string {
 
 export function renderContext(app: App): string {
   const cfg = app.config;
-  const lines: string[] = ['[CONTEXT]', `Local chat with the user: ${ref.TH(app.store.localThread().id)}`];
+  const lines: string[] = ['[CONTEXT]', `Local thread with the user: ${ref.TH(app.store.localThread().id)}`];
   lines.push('Repositories:');
-  if (!cfg.repos.length) lines.push('- (none configured; tasks run in a scratch folder. The user can add repos in Settings.)');
+  if (!cfg.repos.length) lines.push('- (none configured; tasks run in a scratch folder. Add one with `superagent repo add <path|owner/repo>`.)');
   for (const r of cfg.repos) {
     lines.push(
       `- ${r.name}${r.slug ? ` — GitHub ${r.slug}` : ' — local only'}${r.path ? ` · ${r.path}` : ''}${
@@ -116,7 +117,9 @@ export function renderPrimer(app: App): string {
 }
 
 export function renderTurn(app: App, batch: TriggerRow[], fyi: TriggerRow[], notes: string[]): string {
-  const lines: string[] = [`=== ${new Date().toISOString().slice(0, 16).replace('T', ' ')} ===`];
+  const now = new Date();
+  const day = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const lines: string[] = [`=== ${day} ${hhmm(now.getTime())} ===`];
   if (notes.length) lines.push('[SYSTEM NOTES]', ...notes.map((n) => `- ${n}`));
   lines.push(`[NEW EVENTS] (${batch.length})`);
   for (const t of batch) lines.push(renderTrigger(app, t));
@@ -128,8 +131,145 @@ export function renderTurn(app: App, batch: TriggerRow[], fyi: TriggerRow[], not
       lines.push(`- ${ref.T(t.id)} ${dest} · ${t.source} ${t.kind}${t.author ? ` @${t.author}` : ''}${th ? ` on ${threadLabel(th)}` : ''}: "${snippet(t.text, 120)}"`);
     }
   }
+  lines.push(activeWorkers(app));
+  return lines.join('\n');
+}
+
+function activeWorkers(app: App): string {
   const active = app.store.workersWithStatus('queued', 'running', 'waiting').filter((w) => !w.archived);
-  lines.push('[ACTIVE WORKERS]', ...(active.length ? active.map((w) => `- ${workerBrief(app, w)}`) : ['- none']));
+  return ['[ACTIVE WORKERS]', ...(active.length ? active.map((w) => `- ${workerBrief(app, w)}`) : ['- none'])].join('\n');
+}
+
+// ---------- attached agent (the CLI router) ----------
+
+/** What an attached agent reads from `superagent events`. */
+export function renderEvents(app: App, batch: TriggerRow[], fyi: TriggerRow[], notes: string[], away: string | null): string {
+  const parts: string[] = [];
+  if (away) parts.push(away);
+  parts.push(batch.length || fyi.length || notes.length ? renderTurn(app, batch, fyi, notes) : `No new events.\n${activeWorkers(app)}`);
+  return parts.join('\n\n');
+}
+
+/**
+ * What happened while no agent session was attached: the background router's messages for the user,
+ * its replies on other channels, and worker lifecycle lines. Empty string when nothing happened.
+ */
+export function renderAway(app: App, since: number): string {
+  const { store } = app;
+  const local = store.localThread().id;
+  const msgs = store.all<MessageRow>('SELECT * FROM messages WHERE thread_id = ? AND created_at > ? ORDER BY id DESC LIMIT 30', local, since).reverse();
+  const replies = store
+    .all<OutboxRow>('SELECT * FROM outbox WHERE thread_id != ? AND created_at > ? ORDER BY id DESC LIMIT 15', local, since)
+    .reverse();
+  const handled = store.get<{ n: number }>("SELECT COUNT(*) AS n FROM router_turns WHERE started_at > ? AND (session IS NULL OR session != 'attached agent') AND hop = 0", since)?.n ?? 0;
+  if (!msgs.length && !replies.length && !handled) return '';
+  const lines = [`[WHILE YOU WERE AWAY] (since ${hhmm(since)} the background router was in charge; it handled ${handled} batch${handled === 1 ? '' : 'es'} of events)`];
+  for (const m of msgs) {
+    if (m.role === 'agent') lines.push(`- ${hhmm(m.created_at)} background router told the user (pass this on): "${snippet(m.text, 400)}"`);
+    else if (m.role === 'system') lines.push(`- ${hhmm(m.created_at)} ${snippet(m.text, 200)}`);
+  }
+  for (const o of replies) {
+    const th = store.threadById(o.thread_id);
+    lines.push(`- ${hhmm(o.created_at)} replied on ${threadLabel(th)}${o.status === 'failed' ? ' (FAILED to send)' : ''}: "${snippet(o.text, 200)}"`);
+  }
+  return lines.join('\n');
+}
+
+/** Printed by `superagent router attach`: who you are now, the context, and what you missed. */
+export function renderAttach(app: App, seenAt: number | null): string {
+  const pending = app.store.get<{ n: number }>("SELECT COUNT(*) AS n FROM triggers WHERE status = 'pending'")?.n ?? 0;
+  const parts = [
+    '[SUPERAGENT] You are now the router. You talk to the user and hand every piece of real work to workers. Workers report back as events.',
+    renderContext(app),
+  ];
+  const history = seenAt ? renderAway(app, seenAt) : renderPrimer(app);
+  if (history) parts.push(history);
+  parts.push(activeWorkers(app));
+  parts.push(pending ? `${pending} event${pending === 1 ? ' is' : 's are'} waiting: run \`superagent events\` now.` : 'No events are waiting.');
+  return parts.join('\n\n');
+}
+
+// ---------- graph: who is working on what ----------
+
+export interface Graph {
+  router: { mode: 'attached' | 'background'; label: string; busy: boolean };
+  workers: { id: string; agent: string; status: string; title: string; repo: string | null; pr: string | null; follows: string[]; reports_to: string | null }[];
+  threads: { id: string; source: string; title: string; url: string | null }[];
+}
+
+export function graphData(app: App): Graph {
+  const { store } = app;
+  const lease = app.router.lease();
+  const st = app.router.status();
+  const dayAgo = Date.now() - 24 * 3_600_000;
+  const workers = store
+    .listWorkers('current', 60)
+    .filter((w) => ACTIVE.includes(w.status) || w.updated_at > dayAgo)
+    .slice(0, 15)
+    .sort((a, b) => a.id - b.id);
+  const threads = new Map<number, ThreadRow>();
+  const local = store.localThread().id;
+  const out: Graph['workers'] = workers.map((w) => {
+    const follows = store.threadsOf(w.id);
+    for (const t of follows) threads.set(t.id, t);
+    const reply = w.reply_thread_id && w.reply_thread_id !== local ? store.threadById(w.reply_thread_id) : null;
+    if (reply) threads.set(reply.id, reply);
+    return {
+      id: ref.W(w.id),
+      agent: agentLabel(w.agent),
+      status: w.status,
+      title: w.title,
+      repo: w.repo,
+      pr: w.pr_url,
+      follows: follows.map((t) => ref.TH(t.id)),
+      reports_to: reply ? ref.TH(reply.id) : null,
+    };
+  });
+  return {
+    router: lease
+      ? { mode: 'attached', label: `attached agent session (since ${hhmm(lease.since)})`, busy: false }
+      : { mode: 'background', label: `background router (${st.agent}${st.model ? '/' + st.model : ''})`, busy: st.busy },
+    workers: out,
+    threads: [...threads.values()].map((t) => ({ id: ref.TH(t.id), source: t.source, title: t.title ?? t.key, url: t.url })),
+  };
+}
+
+/** A tree for terminals. */
+export function renderGraphTree(g: Graph): string {
+  const titles = new Map(g.threads.map((t) => [t.id, `${t.id} ${t.source} "${snippet(t.title, 60)}"`]));
+  const lines = [`Router: ${g.router.label}${g.router.busy ? ' · thinking' : ''}`];
+  if (!g.workers.length) lines.push('└─ no workers in the last 24 hours');
+  g.workers.forEach((w, i) => {
+    const last = i === g.workers.length - 1;
+    lines.push(`${last ? '└─' : '├─'} ${w.id} ${w.agent} · ${w.status} · "${snippet(w.title, 60)}"${w.repo ? ` · ${w.repo}` : ''}`);
+    const kids = [
+      ...w.follows.map((t) => `follows ${titles.get(t) ?? t}`),
+      ...(w.reports_to && !w.follows.includes(w.reports_to) ? [`reports to ${titles.get(w.reports_to) ?? w.reports_to}`] : []),
+      ...(w.pr ? [`PR ${w.pr}`] : []),
+    ];
+    kids.forEach((k, j) => lines.push(`${last ? '   ' : '│  '}${j === kids.length - 1 ? '└─' : '├─'} ${k}`));
+  });
+  return lines.join('\n');
+}
+
+/** Mermaid, for agents that can show diagrams. */
+export function renderGraphMermaid(g: Graph): string {
+  const q = (s: string) => s.replace(/["<>]/g, "'");
+  const id = (r: string) => r.replace('#', '');
+  const lines = ['flowchart LR', `  R(["Router: ${q(g.router.label)}"])`];
+  for (const t of g.threads) lines.push(`  ${id(t.id)}[/"${t.id} ${t.source}: ${q(snippet(t.title, 40))}"/]`);
+  for (const w of g.workers) {
+    lines.push(`  ${id(w.id)}["${w.id} ${q(w.agent)} · ${w.status}<br/>${q(snippet(w.title, 40))}"]:::${w.status}`);
+    lines.push(`  R --> ${id(w.id)}`);
+    for (const t of w.follows) lines.push(`  ${id(w.id)} -. follows .-> ${id(t)}`);
+    if (w.reports_to && !w.follows.includes(w.reports_to)) lines.push(`  ${id(w.id)} -- reports --> ${id(w.reports_to)}`);
+  }
+  lines.push(
+    '  classDef running stroke:#2d5be3,stroke-width:2px',
+    '  classDef waiting stroke:#c98a00,stroke-width:2px',
+    '  classDef failed stroke:#c2392f',
+    '  classDef done stroke:#2e8540',
+  );
   return lines.join('\n');
 }
 

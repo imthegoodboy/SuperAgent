@@ -1,7 +1,7 @@
 {
   "name": "@imthegoodboy/superagent",
   "version": "0.1.0",
-  "description": "A local, always-on super-agent that orchestrates Claude Code, Codex, OpenCode and Cursor as parallel workers.",
+  "description": "Turns your coding agent (Claude Code, Codex, OpenCode, Cursor) into a Super-agent: an always-on router that runs other coding agents in parallel, each in its own git worktree.",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -13,8 +13,8 @@
   },
   "files": [
     "dist",
-    "ui",
     "skill",
+    "scripts/postinstall.mjs",
     "README.md",
     "LICENSE"
   ],
@@ -27,16 +27,20 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test --test-reporter=spec \"test/**/*.test.mjs\"",
     "prepare": "npm run build",
-    "start": "node dist/cli.js start"
+    "start": "node dist/cli.js start",
+    "postinstall": "node scripts/postinstall.mjs"
   },
   "keywords": [
     "agent",
+    "super-agent",
     "orchestrator",
+    "router",
     "claude-code",
     "codex",
     "opencode",
     "cursor",
     "multi-agent",
+    "skill",
     "cli"
   ],
   "devDependencies": {

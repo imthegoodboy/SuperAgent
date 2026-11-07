@@ -40,7 +40,15 @@ export interface Config {
   port: number;
   /** Keyword that counts as an explicit mention in GitHub/Telegram. */
   mention: string;
-  router: { agent: AgentId; model: string; maxBatch: number; rotateAfterTurns: number };
+  router: {
+    /** Agent CLI that runs the background router (used whenever no agent session is attached). */
+    agent: AgentId;
+    model: string;
+    maxBatch: number;
+    rotateAfterTurns: number;
+    /** An attached agent session stays the router this long after its last router command. */
+    leaseMinutes: number;
+  };
   workers: {
     defaultAgent: AgentId;
     maxConcurrent: number;
@@ -59,7 +67,7 @@ export interface Config {
   watchdog: { enabled: boolean; llmChecks: boolean; checkMinutes: number };
 }
 
-export const DEFAULT_POLICIES = `- In monitored GitHub repos, if someone reports a clear, reproducible bug without mentioning me, silently try to reproduce and fix it (dispatch with silent=true). Only speak up if a fix is ready.
+export const DEFAULT_POLICIES = `- In monitored GitHub repos, if someone reports a clear, reproducible bug without mentioning me, silently try to reproduce and fix it (a silent dispatch). Only speak up if a fix is ready.
 - Ignore small talk, thanks, and messages that need no action.`;
 
 export function defaultConfig(): Config {
@@ -67,7 +75,7 @@ export function defaultConfig(): Config {
     port: 7878,
     // "@superagent" would ping a real GitHub user of that name; a slash command doesn't.
     mention: '/superagent',
-    router: { agent: 'claude', model: 'haiku', maxBatch: 20, rotateAfterTurns: 60 },
+    router: { agent: 'claude', model: 'haiku', maxBatch: 20, rotateAfterTurns: 60, leaseMinutes: 15 },
     workers: {
       defaultAgent: 'claude',
       maxConcurrent: 3,
@@ -171,5 +179,6 @@ export function applyConfigPatch(cfg: Config, patch: unknown): Config {
   next.repos = (next.repos ?? []).map(normalizeRepo);
   next.workers.maxConcurrent = Math.max(1, Math.min(16, Math.round(Number(next.workers.maxConcurrent) || 3)));
   next.github.pollSeconds = Math.max(15, Math.round(Number(next.github.pollSeconds) || 45));
+  next.router.leaseMinutes = Number(next.router.leaseMinutes) > 0 ? Number(next.router.leaseMinutes) : 15;
   return next;
 }

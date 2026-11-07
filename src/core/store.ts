@@ -456,8 +456,8 @@ export class Store {
   }
 
   // ---- memory ----
-  addMemory(text: string): void {
-    this.run('INSERT INTO memory (text, created_at) VALUES (?, ?)', text, Date.now());
+  addMemory(text: string): number {
+    return this.run('INSERT INTO memory (text, created_at) VALUES (?, ?)', text, Date.now()).id;
   }
   memory(limit = 40): { id: number; text: string; created_at: number }[] {
     return this.all('SELECT * FROM memory ORDER BY id DESC LIMIT ?', limit);

@@ -8,7 +8,8 @@ export const GITHUB_SIGNATURE = '\n\n<!-- superagent -->';
 export class Outbound {
   constructor(private app: App) {}
 
-  async send(threadId: number, text: string): Promise<void> {
+  /** Never throws for delivery problems: the result says whether it was sent. */
+  async send(threadId: number, text: string): Promise<{ ok: boolean; error?: string }> {
     const { store } = this.app;
     const th = store.threadById(threadId);
     if (!th) throw new Error(`unknown thread ${ref.TH(threadId)}`);
@@ -29,6 +30,8 @@ export class Outbound {
         throw new Error(`cannot reply to a ${th.source} thread`);
       }
       store.updateOutbox(outId, 'sent');
+      emit('outbox', { thread_id: threadId });
+      return { ok: true };
     } catch (e) {
       const msg = (e as Error).message;
       store.updateOutbox(outId, 'failed', msg);
@@ -38,8 +41,8 @@ export class Outbound {
       if (threadId !== local) {
         emit('message', store.addMessage(local, 'system', `Could not post to ${th.title ?? th.key}: ${msg}\n\nMessage was:\n${text}`, { event: 'delivery_failed' }));
       }
-      this.app.router.note(`Reply to ${ref.TH(threadId)} failed: ${msg}`);
+      emit('outbox', { thread_id: threadId });
+      return { ok: false, error: msg };
     }
-    emit('outbox', { thread_id: threadId });
   }
 }

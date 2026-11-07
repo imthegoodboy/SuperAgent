@@ -12,7 +12,7 @@ const cli = path.join(root, 'dist', 'cli.js');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'superagent-cli-'));
 const home = path.join(tmp, 'data'); // deliberately not created
 // A port nothing listens on, so commands see "not running".
-const env = { ...process.env, SUPERAGENT_HOME: home, NO_COLOR: '1' };
+const env = { ...process.env, SUPERAGENT_HOME: home, SUPERAGENT_SKIP_INTEGRATIONS: '1', NO_COLOR: '1' };
 const sa = (...args) => spawnSync(process.execPath, [cli, ...args], { env, encoding: 'utf8', timeout: 60_000 });
 
 after(() => fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 3 }));
@@ -33,9 +33,15 @@ test('config and repo commands work before the daemon ever ran', () => {
 });
 
 test('errors are short messages, not stack traces', () => {
-  const r = sa('msg', 'W9', 'hello');
+  const r = sa('workers');
   assert.equal(r.status, 1);
   assert.match(r.stderr, /not running/);
+  const unknown = sa('chat');
+  assert.equal(unknown.status, 1);
+  assert.match(unknown.stderr, /Unknown command "chat"/);
+  const json = sa('workers', '--json');
+  assert.equal(json.status, 1);
+  assert.equal(JSON.parse(json.stdout).ok, false, 'errors are JSON with --json');
   assert.doesNotMatch(r.stderr, /\n\s+at /, 'no stack trace');
   const bad = sa('repo', 'add', path.join(tmp, 'nope-not-a-folder-or-slug!'));
   assert.equal(bad.status, 1);

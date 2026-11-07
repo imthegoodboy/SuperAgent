@@ -1,21 +1,13 @@
-import fs from 'node:fs';
 import http from 'node:http';
-import path from 'node:path';
 import type { App } from './app.js';
 import { publicConfig } from '../core/config.js';
-import { HOME_ID, UI_DIR, pkgVersion } from '../core/paths.js';
+import { HOME_ID, pkgVersion } from '../core/paths.js';
 import { bus, emit, ref } from '../core/util.js';
-import { autostartStatus, installSkill, openFolder, resolveRepoInput, setAutostart, skillStatus, type SkillTarget } from './system.js';
+import { graphData, renderGraphMermaid, renderGraphTree, renderRecall } from '../router/render.js';
+import { normalizeActions } from '../router/router.js';
+import { resolveRepoInput } from './system.js';
 
-const MIME: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.ico': 'image/x-icon',
-  '.json': 'application/json',
-};
+// The API is for the `superagent` CLI, which agents (Claude Code, Codex, …) drive. There is no web UI.
 
 class HttpError extends Error {
   constructor(
@@ -26,7 +18,15 @@ class HttpError extends Error {
   }
 }
 
-type Handler = (ctx: { app: App; params: string[]; query: URLSearchParams; body: any; req: http.IncomingMessage }) => unknown | Promise<unknown>;
+type Handler = (ctx: {
+  app: App;
+  params: string[];
+  query: URLSearchParams;
+  body: any;
+  req: http.IncomingMessage;
+  /** Aborted when the client goes away (long polls stop waiting). */
+  signal: AbortSignal;
+}) => unknown | Promise<unknown>;
 
 interface Route {
   method: string;
@@ -53,14 +53,39 @@ function route(method: string, pattern: string, handler: Handler): void {
 
 route('GET', '/api/state', ({ app }) => app.state());
 
-route('GET', '/api/messages', ({ app, query }) => {
-  const before = Number(query.get('before')) || undefined;
-  return app.store.messages(app.store.localThread().id, Number(query.get('limit')) || 200, before);
+// ---------- the router, for an attached agent session ----------
+
+route('POST', '/api/router/attach', async ({ app, body }) => {
+  try {
+    return await app.router.attach(!!body?.take);
+  } catch (e) {
+    throw new HttpError(409, (e as Error).message);
+  }
 });
-route('POST', '/api/messages', ({ app, body }) => {
-  const text = String(body?.text ?? '').trim();
-  if (!text) throw new HttpError(400, 'text is required');
-  return app.sendLocal(text);
+route('POST', '/api/router/detach', ({ app }) => {
+  app.router.detach();
+  return { ok: true };
+});
+route('GET', '/api/router/events', ({ app, query, signal }) => {
+  // fetch() gives up on a response after 300 s, so long polls stay below that.
+  const wait = Math.min(280, Math.max(0, Number(query.get('wait')) || 0));
+  return app.router.events(wait * 1000, signal);
+});
+route('POST', '/api/router/actions', ({ app, body }) => {
+  const raw = Array.isArray(body?.actions) ? body.actions : body ? [body] : [];
+  const actions = normalizeActions(raw);
+  if (actions.length !== raw.length) throw new HttpError(400, `unknown action type in ${JSON.stringify(raw.map((a: any) => a?.type))}`);
+  if (!actions.length) throw new HttpError(400, 'no actions');
+  return app.router.act(actions);
+});
+route('GET', '/api/recall', ({ app, query }) => {
+  const ids = String(query.get('ids') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (!ids.length) throw new HttpError(400, 'ids is required, e.g. ids=W#3,TH#8');
+  return { text: renderRecall(app, ids) };
+});
+route('GET', '/api/graph', ({ app }) => {
+  const g = graphData(app);
+  return { ...g, tree: renderGraphTree(g), mermaid: renderGraphMermaid(g) };
 });
 
 route('GET', '/api/workers', ({ app, query }) =>
@@ -71,15 +96,6 @@ route('GET', '/api/workers', ({ app, query }) =>
       : w,
   ),
 );
-route('POST', '/api/workers', ({ app, body }) => {
-  const task = String(body?.task ?? '').trim();
-  if (!task) throw new HttpError(400, 'task is required');
-  try {
-    return app.dispatchDirect({ task, title: body.title, agent: body.agent || undefined, repo: body.repo || undefined });
-  } catch (e) {
-    throw new HttpError(400, (e as Error).message);
-  }
-});
 route('GET', '/api/workers/:id', ({ app, params }) => {
   const w = requireWorker(app, id(params));
   return {
@@ -117,12 +133,6 @@ route('POST', '/api/workers/:id/retry', ({ app, params }) => {
 });
 route('POST', '/api/workers/:id/archive', async ({ app, params }) => {
   await app.workers.archive(requireWorker(app, id(params)).id);
-  return { ok: true };
-});
-route('POST', '/api/workers/:id/open', ({ app, params }) => {
-  const w = requireWorker(app, id(params));
-  if (!w.cwd || !fs.existsSync(w.cwd)) throw new HttpError(400, 'workspace does not exist');
-  openFolder(w.cwd);
   return { ok: true };
 });
 
@@ -220,24 +230,6 @@ route('POST', '/api/watchdog/action', ({ app, body }) => {
   }
 });
 
-route('GET', '/api/system', async ({ app }) => ({
-  version: pkgVersion(),
-  home: app.state().home,
-  platform: process.platform,
-  node: process.version,
-  autostart: await autostartStatus(),
-  skill: skillStatus(),
-}));
-route('POST', '/api/system/skill', ({ body }) => {
-  const target: SkillTarget = body?.target === 'codex' ? 'codex' : 'claude';
-  return { path: installSkill(target), skill: skillStatus() };
-});
-route('POST', '/api/system/autostart', async ({ body }) => ({ autostart: await setAutostart(!!body?.enabled) }));
-route('POST', '/api/system/open-home', ({ app }) => {
-  openFolder(app.state().home);
-  return { ok: true };
-});
-
 route('POST', '/api/shutdown', ({ app }) => {
   setTimeout(() => app.onShutdown?.(), 100);
   return { ok: true };
@@ -280,27 +272,6 @@ function readBody(req: http.IncomingMessage): Promise<any> {
   });
 }
 
-function serveStatic(app: App, pathname: string, res: http.ServerResponse): void {
-  const rel = pathname === '/' ? 'index.html' : decodeURIComponent(pathname.slice(1));
-  const file = path.resolve(UI_DIR, rel);
-  if (!file.startsWith(path.resolve(UI_DIR) + path.sep) || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
-    // Single-page app: unknown paths get the shell.
-    if (!path.extname(rel)) return serveStatic(app, '/', res);
-    return send(res, 404, 'not found');
-  }
-  const data = fs.readFileSync(file);
-  res.writeHead(200, {
-    'content-type': MIME[path.extname(file)] ?? 'application/octet-stream',
-    'cache-control': 'no-store',
-    'x-content-type-options': 'nosniff',
-    'referrer-policy': 'no-referrer',
-    ...(rel === 'index.html'
-      ? { 'content-security-policy': "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'" }
-      : {}),
-  });
-  res.end(data);
-}
-
 function sse(app: App, req: http.IncomingMessage, res: http.ServerResponse): void {
   res.writeHead(200, {
     'content-type': 'text/event-stream',
@@ -331,10 +302,7 @@ export function createServer(app: App): http.Server {
     if (url.pathname === '/api/health') {
       return send(res, 200, { ok: true, name: 'superagent', home: HOME_ID, version: pkgVersion(), pid: process.pid, uptime: Date.now() - app.startedAt });
     }
-    if (!url.pathname.startsWith('/api/')) {
-      if (method !== 'GET') return send(res, 405, 'method not allowed');
-      return serveStatic(app, url.pathname, res);
-    }
+    if (!url.pathname.startsWith('/api/')) return send(res, 404, 'SuperAgent has no web pages. Use the `superagent` CLI.');
 
     // CSRF guard: browsers attach Origin to cross-site requests; only our own pages may call us.
     const origin = req.headers.origin;
@@ -348,9 +316,12 @@ export function createServer(app: App): http.Server {
       if (r.method !== method) continue;
       const m = url.pathname.match(r.re);
       if (!m) continue;
+      const ctrl = new AbortController();
+      res.on('close', () => ctrl.abort());
       try {
         const body = method === 'GET' || method === 'DELETE' ? {} : await readBody(req);
-        const out = await r.handler({ app, params: m.slice(1), query: url.searchParams, body, req });
+        const out = await r.handler({ app, params: m.slice(1), query: url.searchParams, body, req, signal: ctrl.signal });
+        if (res.destroyed) return;
         return send(res, 200, out ?? { ok: true });
       } catch (e) {
         const status = e instanceof HttpError ? e.status : 500;

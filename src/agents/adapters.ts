@@ -23,6 +23,8 @@ export interface RunSpec {
   autonomy: 'full' | 'safe';
   /** Directories outside cwd the agent must be able to write (e.g. the main repo's .git for worktrees). */
   writableDirs: string[];
+  /** Extra environment for the agent process. */
+  env?: NodeJS.ProcessEnv;
 }
 
 export interface RouterSpec {

@@ -42,6 +42,7 @@ function launch(
   prompt: string,
   onEvent: (ev: AgentEvent) => void,
   timeoutMs?: number,
+  env?: NodeJS.ProcessEnv,
 ): AgentRun {
   const started = Date.now();
   const resolved = resolveAdapter(adapter);
@@ -76,6 +77,7 @@ function launch(
     cwd,
     args: fullArgs,
     stdin: adapter.promptVia === 'stdin' ? prompt : undefined,
+    env,
     timeoutMs,
     onLine: (line, stream) => {
       if (stream === 'stdout') {
@@ -99,7 +101,7 @@ function launch(
 export function startWorkerRun(adapter: AgentAdapter, spec: RunSpec, onEvent: (ev: AgentEvent) => void, timeoutMs?: number): AgentRun {
   const prompt =
     adapter.supportsSystem || !spec.system || spec.session ? spec.prompt : `${spec.system}\n\n---\n\n${spec.prompt}`;
-  return launch(adapter, spec.cwd, adapter.workerArgs(spec), prompt, onEvent, timeoutMs);
+  return launch(adapter, spec.cwd, adapter.workerArgs(spec), prompt, onEvent, timeoutMs, spec.env);
 }
 
 export function startRouterRun(adapter: AgentAdapter, spec: RouterSpec, timeoutMs = 180_000): AgentRun {

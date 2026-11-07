@@ -44,6 +44,7 @@ export function workerSystem(app: App, w: WorkerRow, ws: Workspace): string {
   }
   lines.push(
     '- Do not comment on GitHub issues or PRs or message people yourself. The Router does all communication; put what people need to know in your report.',
+    '- You are a worker, not the router: do not use the superagent skill or start other SuperAgent workers.',
     '- Verify your work with the project\'s build, tests or linters when they exist.',
     '- If you are blocked or need a human decision, stop and ask through the report (status "needs_input").',
     '',

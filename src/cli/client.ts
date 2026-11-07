@@ -35,7 +35,7 @@ export async function api<T = any>(method: string, path: string, body?: unknown)
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch {
-    throw new Error('SuperAgent is not running. Start it with: superagent start');
+    throw new Error('SuperAgent is not running. Start it with `superagent start` (router commands start it by themselves).');
   }
   const j: any = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(j?.error ?? `HTTP ${res.status}`);

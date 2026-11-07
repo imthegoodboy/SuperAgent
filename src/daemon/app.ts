@@ -1,7 +1,7 @@
 import { AGENT_IDS, applyConfigPatch, ensureConfigFile, ensureToken, publicConfig, saveConfig, type AgentId, type Config, type RepoConfig } from '../core/config.js';
 import { ensureDirs, paths, pkgVersion } from '../core/paths.js';
-import { LOCAL_THREAD_KEY, Store } from '../core/store.js';
-import { emit, log, ref, snippet } from '../core/util.js';
+import { Store } from '../core/store.js';
+import { emit, log } from '../core/util.js';
 import { detectAgents, type AgentInfo } from '../agents/runner.js';
 import { GitHubSource } from '../channels/github.js';
 import { Outbound } from '../channels/outbound.js';
@@ -16,6 +16,8 @@ export class App {
   readonly startedAt = Date.now();
   config: Config;
   agents: AgentInfo[] = [];
+  /** Settles once the first agent detection is done (the server answers before that). */
+  agentsReady: Promise<unknown> = Promise.resolve();
   readonly ingest: Ingest;
   readonly router: Router;
   readonly workers: WorkerManager;
@@ -38,7 +40,8 @@ export class App {
   }
 
   async init(): Promise<void> {
-    await this.refreshAgents();
+    this.agentsReady = this.refreshAgents().catch(() => {});
+    await this.agentsReady;
     this.workers.recover();
     this.router.kick();
     this.github.start();
@@ -83,35 +86,6 @@ export class App {
     if (JSON.stringify(prev.telegram) !== JSON.stringify(next.telegram)) this.telegram.reload();
     this.workers.schedule();
     return next;
-  }
-
-  /** A message typed in the desktop app or CLI. */
-  sendLocal(text: string) {
-    const local = this.store.localThread();
-    const message = this.store.addMessage(local.id, 'user', text);
-    emit('message', message);
-    const trigger = this.ingest.ingest({ source: 'local', kind: 'message', threadKey: LOCAL_THREAD_KEY, author: 'you', text });
-    return { message, trigger };
-  }
-
-  /** Start a worker directly (CLI `run`, desktop "New task", skill), skipping the router's decision. */
-  dispatchDirect(input: { title?: string; task: string; agent?: string; repo?: string }) {
-    const repo = this.findRepo(input.repo);
-    if (input.repo && !repo) throw new Error(`Unknown repo "${input.repo}". Add it first (superagent repo add …).`);
-    const requested = (input.agent ?? '').toLowerCase() as AgentId;
-    if (input.agent && !this.availableAgents().includes(requested)) {
-      throw new Error(`Agent "${input.agent}" is not available. Available: ${this.availableAgents().join(', ') || 'none'}`);
-    }
-    const w = this.workers.create({
-      title: input.title?.trim() || snippet(input.task, 60),
-      task: input.task,
-      agent: this.pickAgent(input.agent ? requested : undefined, repo?.agent),
-      repo: repo?.name ?? null,
-      replyThreadId: this.store.localThread().id,
-      createdBy: 'user',
-    });
-    this.ingest.ingest({ source: 'user', kind: 'direct_task', text: `${ref.W(w.id)} "${w.title}" (${w.agent}): ${w.task}` });
-    return w;
   }
 
   state() {
