@@ -29,6 +29,8 @@ export interface CreateWorker {
   silent?: boolean;
   /** Branch or ref to start from instead of the repo's default branch. */
   base?: string | null;
+  /** Start only after this worker is done. */
+  after?: number | null;
   createdBy: 'router' | 'user';
 }
 
@@ -86,6 +88,7 @@ export class WorkerManager {
       origin_trigger_id: spec.originTriggerId ?? null,
       silent: spec.silent,
       base: spec.base ?? null,
+      after_worker: spec.after ?? null,
       created_by: spec.createdBy,
     });
     const threads = new Set(spec.threads ?? []);
@@ -160,12 +163,12 @@ export class WorkerManager {
   }
 
   /** Archive finished workers last touched more than `days` ago; returns their ids. */
-  async cleanup(days: number): Promise<number[]> {
+  async cleanup(days: number, dryRun = false): Promise<number[]> {
     const before = Date.now() - days * 86_400_000;
     const old = this.app.store
       .all<WorkerRow>("SELECT * FROM workers WHERE archived = 0 AND status IN ('done', 'failed', 'stopped') AND updated_at < ? ORDER BY id", before)
       .filter((w) => !this.active.has(w.id));
-    for (const w of old) await this.archive(w.id);
+    if (!dryRun) for (const w of old) await this.archive(w.id);
     return old.map((w) => w.id);
   }
 
@@ -179,8 +182,34 @@ export class WorkerManager {
     this.schedule();
   }
 
+  /** Why a queued worker isn't running yet: its dependency, all slots busy, or too little memory. */
+  queueReason(w: WorkerRow): { reason: 'after' | 'slot' | 'memory'; detail: string } | null {
+    if (w.status !== 'queued') return null;
+    const dep = w.after_worker ? this.app.store.workerById(w.after_worker) : null;
+    if (dep && dep.status !== 'done') return { reason: 'after', detail: `waits for ${ref.W(dep.id)} (${dep.status})` };
+    const max = this.app.config.workers.maxConcurrent;
+    if (this.active.size >= max) return { reason: 'slot', detail: `${this.active.size}/${max} slots busy` };
+    const free = Math.round(os.freemem() / 1048576);
+    const need = this.app.config.workers.minFreeMemoryMB;
+    if (this.active.size > 0 && free < need) return { reason: 'memory', detail: `${free} MB free, needs ${need} MB (workers.minFreeMemoryMB)` };
+    return null;
+  }
+
   private needsRun(w: WorkerRow): boolean {
     if (w.archived || this.active.has(w.id)) return false;
+    if (w.after_worker && w.status === 'queued') {
+      const dep = this.app.store.workerById(w.after_worker);
+      if (dep && ['failed', 'stopped'].includes(dep.status)) {
+        // What it waited for will never be done: say so instead of waiting forever.
+        const msg = `${ref.W(dep.id)} ended ${dep.status}, and this task was to start after it`;
+        this.app.store.updateWorker(w.id, { status: 'failed', error: msg });
+        this.app.store.addLog(w.id, null, 'error', msg);
+        this.report(w.id, 'failed', '', null, null, msg);
+        this.changed(w.id);
+        return false;
+      }
+      if (dep && dep.status !== 'done') return false;
+    }
     if (w.status === 'queued') return true;
     return this.app.store.undelivered(w.id).length > 0;
   }
@@ -214,6 +243,12 @@ export class WorkerManager {
       if (!adapter) throw new Error(`Unknown agent "${w.agent}"`);
       let ws: Workspace;
       if (!w.cwd) {
+        // dispatch --after in the same repo: build on that worker's branch, so its work is there.
+        const dep = w.after_worker && !w.base ? store.workerById(w.after_worker) : null;
+        if (dep?.branch && dep.repo === w.repo) {
+          store.updateWorker(id, { base: dep.branch });
+          w = store.workerById(id)!;
+        }
         store.updateWorker(id, { status: 'running' });
         this.changed(id);
         ws = await prepareWorkspace(w, repo, { ownGitDir: !!adapter.needsOwnGitDir?.(config.workers.autonomy) });
@@ -369,7 +404,7 @@ export class WorkerManager {
     const endLog = store.addLog(id, runId, status === 'failed' ? 'error' : 'system', `Run finished: ${status}${error ? ` · ${snippet(error, 300)}` : ''}`);
     emit('worker_log', endLog);
     if (report?.question) emit('worker_log', store.addLog(id, runId, 'inbox', `Question for you: ${report.question}`));
-    this.report(id, report?.status ?? (error ? 'failed' : 'done'), summary, pr, report?.question ?? null, error);
+    this.report(id, report?.status ?? (error ? 'failed' : 'done'), summary, pr, report?.question ?? null, error, report?.verified ?? null);
     const line =
       status === 'waiting' ? `${ref.W(id)} needs your input: ${w.title}` : `${status === 'done' ? 'Finished' : 'Failed'} ${ref.W(id)}: ${w.title}`;
     // A silent task is only news when it changed something.
@@ -390,13 +425,13 @@ export class WorkerManager {
     this.app.store.subscribe(id, th.id);
   }
 
-  private report(id: number, status: string, summary: string, pr: string | null, question: string | null, error: string | null): void {
+  private report(id: number, status: string, summary: string, pr: string | null, question: string | null, error: string | null, verified: string | null = null): void {
     const w = this.app.store.workerById(id);
     this.app.ingest.ingest({
       source: 'worker',
       kind: 'report',
       text: summary || error || '(no summary)',
-      meta: { worker: id, status, pr_url: pr, question, error },
+      meta: { worker: id, status, pr_url: pr, question, error, verified },
       // Acting ahead (Section 3.4): a silent task is only news if it worked. Its other results are kept
       // on the worker and in the activity log, but no router is asked to announce them.
       // (no_change, nothing needed doing, is dropped the same way.)
@@ -427,6 +462,7 @@ export class WorkerManager {
         'SuperAgent restarted while you were working. Check the current state of your workspace (git status, files) and continue the task.',
       );
       store.updateWorker(w.id, { status: 'queued', pid: null });
+      store.addLog(w.id, null, 'system', 'SuperAgent restarted during this run; resuming it (the step in progress is redone)');
       log(`worker ${ref.W(w.id)} will resume after restart`);
     }
     this.schedule();

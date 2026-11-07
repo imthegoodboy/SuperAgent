@@ -1,12 +1,15 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import type { AddressInfo } from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { AGENT_IDS, applyConfigPatch, loadConfig, publicConfig, saveConfig, type SourceMode } from '../core/config.js';
 import { CLI_PATH, ensureDirs, paths, pkgVersion } from '../core/paths.js';
-import { ago, duration, sleep } from '../core/util.js';
+import { ago, duration, sleep, slugify, snippet, tryJson } from '../core/util.js';
+import { ADAPTERS } from '../agents/adapters.js';
 import { commandLine, isAlive, killTree, resolveCommand, run, runInteractive } from '../agents/process.js';
-import { checkSignIn, detectAgents } from '../agents/runner.js';
+import { checkSignIn, detectAgents, startWorkerRun } from '../agents/runner.js';
 import {
   autostartStatus,
   chooseAutostart,
@@ -21,6 +24,7 @@ import {
 } from '../daemon/system.js';
 import { STOP_FLAG, watchdogPid } from '../daemon/watchdog.js';
 import { api, baseUrl, events, health, sessionId, token } from './client.js';
+import { fileUrl, pageIn, preview, serve, type PreviewResult } from './preview.js';
 
 // The `superagent` CLI is used by coding agents (Claude Code, Codex, OpenCode, Cursor) that load the
 // superagent skill and act as SuperAgent's router. Output is plain text for the agent to read, or
@@ -113,10 +117,13 @@ ${bold('Be the router')}
   router detach               Hand the router role back to the background router
   router status               Who is the router right now, and its recent turns
   events [--wait <seconds>]   New events that need a decision (waits up to 280 s for one with --wait)
+                                --peek shows them without handing them out; --again repeats the last batch
   dispatch <task|->           Start a worker and return at once
                                 --agent claude|codex|opencode|cursor  --repo <name|owner/repo|.>  --title <text>
                                 --follow TH#8,TH#9  --reply TH#8  --base <branch>  --silent
+                                --after W#2 (start when W#2 is done)  --verify syntax|tests|browser
   tell <W#3> <text|-> [--now] New instructions for a worker (it resumes with its memory); --now interrupts it
+                              and redoes the step it is on
   cancel <W#3> [--reason r]   Stop a worker
   reply <TH#8> <text|->       Post on a thread: a GitHub issue or PR, a Telegram chat
   ignore <T#41> [T#42 …]      Mark events as needing nothing  [--reason r]
@@ -125,20 +132,27 @@ ${bold('Be the router')}
   remember <fact|->           Keep a long-term fact; memory lists them, forget <id> removes one
 
 ${bold('Workers')}
-  workers [--all]             List workers (alias: ls)
+  workers [--all]             List workers with their time so far (alias: ls)
+  result <W#3>                A worker's full final answer, its report, and the files it changed
+  wait <W#3> [W#4 …]          Block until these workers finish or need input  [--timeout 280]
   logs <W#3> [-f]             What a worker did; -f follows live. Without an id: the service log
   diff <W#3> [--patch]        What a worker changed: commits, files, uncommitted work
+  preview <W#3|path> [file]   Screenshot a web page at a real device width; lists the page's errors
+                                --width 375,1280  --height 800  --full  --dark  --out shot.png
+  serve <W#3|path> [--port n] Serve a worker's folder on http://127.0.0.1 to open it in a browser
+  merge <W#3> [W#4 …]         Merge workers' branches, in order, into the repo folder's branch  [--into main]
   retry <W#3>                 Run a failed or stopped worker again
   archive <W#3>               Remove a finished worker's workspace (its branch and PR stay)
-  cleanup [--days 7]          Archive every worker that finished more than N days ago
-  graph [--mermaid]           Router → workers → threads they follow
+  cleanup [--days 7]          Archive every worker that finished more than N days ago  [--dry-run]
+  graph [--all] [--mermaid]   Router → workers → threads they follow (active and last 3 hours)
 
 ${bold('Service and setup')}
-  start | stop | restart | status
+  start | stop | status
+  restart [--when-idle]       Restart the service; --when-idle waits until no worker is running
   repo add <path|owner/repo> [--mode mentions|all|off] [--name n] [--agent a] [--allow u1,u2]
   repo list | repo rm <name>
   activity                    Recent events and what happened to each (why something was ignored)
-  agents | doctor
+  agents | doctor [--deep]    --deep makes a tiny real call to each agent (catches stale logins)
   config [get <key> | set <key> <value>]
   install | uninstall         Add or remove the skill for every coding agent on this computer
   autostart on|off
@@ -199,7 +213,7 @@ async function ensureRunning(): Promise<void> {
   if (!h) return start(false, true);
   // After `npm i -g` the old service keeps running until restarted.
   if (!checkedVersion && h.version !== pkgVersion()) {
-    console.error(yellow(`SuperAgent ${h.version} is running, but ${pkgVersion()} is installed. Run \`superagent restart\` to switch (workers resume).`));
+    console.error(yellow(`SuperAgent ${h.version} is running, but ${pkgVersion()} is installed. Run \`superagent restart --when-idle\` to switch once no worker is running.`));
   }
   checkedVersion = true;
 }
@@ -218,6 +232,30 @@ async function stop(quiet = false): Promise<void> {
   out({ ok: true, running: false }, () => console.log(h ? `${dim('●')} SuperAgent stopped` : dim('SuperAgent was not running')));
 }
 
+/**
+ * A restart interrupts running workers: they resume afterwards, but redo the step they were on (a
+ * model writing a large file loses all of it). Say so first; --when-idle waits, --force goes ahead.
+ */
+async function restartGuard(v: Record<string, any>): Promise<void> {
+  if (v.force || !(await health())) return;
+  const running = async () => ((await api<any[]>('GET', '/api/workers')) ?? []).filter((w) => w.status === 'running');
+  let busy = await running();
+  if (!busy.length) return;
+  const names = (ws: any[]) => ws.map((w) => `W#${w.id} (${duration(w.elapsed_ms ?? 0)})`).join(', ');
+  if (!v['when-idle']) {
+    die(
+      `${busy.length} worker${busy.length === 1 ? ' is' : 's are'} running: ${names(busy)}. A restart interrupts ${busy.length === 1 ? 'it' : 'them'}; ` +
+        `${busy.length === 1 ? 'it resumes' : 'they resume'} afterwards but redo${busy.length === 1 ? 'es' : ''} the step in progress. ` +
+        'Run `superagent restart --when-idle` to restart once none is running, or `--force` to restart now.',
+    );
+  }
+  if (!asJson) console.log(dim(`Waiting for ${names(busy)} to finish before restarting…`));
+  while (busy.length) {
+    await sleep(5000);
+    busy = await running();
+  }
+}
+
 async function status(): Promise<void> {
   const h = await health();
   if (!h) {
@@ -234,6 +272,7 @@ async function status(): Promise<void> {
     console.log(`  ${dim('Router ')}  ${who}${r.pending ? ` · ${yellow(`${r.pending} events waiting`)}` : ''}${r.lastError && !r.attached ? red(` · last error: ${String(r.lastError).slice(0, 80)}`) : ''}`);
     const parts = ['running', 'queued', 'waiting', 'done', 'failed'].filter((k) => c[k]).map((k) => STATUS_COLOR[k](`${c[k]} ${k}`));
     console.log(`  ${dim('Workers')}  ${parts.join(' · ') || 'none yet'} ${dim(`(max ${s.workers.max} in parallel)`)}`);
+    for (const q of (s.workers.queued ?? []) as { id: number; why: string | null }[]) if (q.why) console.log(dim(`           W#${q.id} queued: ${q.why}`));
     const agentList = s.agents.map((a: any) => (a.installed ? `${green('✓')} ${a.id}` : `${red('✗')} ${dim(a.id)}`)).join('  ');
     console.log(`  ${dim('Agents ')}  ${agentList || dim('detecting…')}`);
     const gh = s.github;
@@ -248,7 +287,7 @@ async function status(): Promise<void> {
 // ---------- the router: an attached agent session ----------
 
 /** Workers see the skill too. They may look around, but only the router changes anything. */
-const WORKER_COMMANDS = new Set(['status', 'workers', 'ls', 'logs', 'diff', 'recall', 'graph', 'memory', 'activity', 'agents', 'doctor', 'hook']);
+const WORKER_COMMANDS = new Set(['status', 'workers', 'ls', 'logs', 'diff', 'result', 'wait', 'preview', 'recall', 'graph', 'memory', 'activity', 'agents', 'doctor', 'hook']);
 
 function refuseInWorker(cmd: string | undefined, sub: string | undefined): void {
   const w = process.env.SUPERAGENT_WORKER;
@@ -333,9 +372,17 @@ async function router(sub: string | undefined, v: Record<string, any>): Promise<
 
 async function eventsCmd(v: Record<string, any>): Promise<void> {
   await ensureRunning();
+  if (v.peek || v.again) {
+    const r = await api('GET', `/api/router/events?${v.again ? 'again' : 'peek'}=1`);
+    return out(r, () => console.log(r.text));
+  }
   const wait = Math.max(0, Math.min(280, Number(v.wait ?? 0) || 0));
   const r = await api('GET', `/api/router/events?wait=${wait}`);
-  out(r, () => console.log(r.text));
+  out(r, () => {
+    console.log(r.text);
+    // Agents' shells cut long output; without this line they can tell the batch was cut short.
+    if (r.events?.length) console.log(dim(`[end of ${r.events.length} event${r.events.length === 1 ? '' : 's'}; if you did not see them all, run \`superagent events --again\`]`));
+  });
 }
 
 // ---------- workers ----------
@@ -347,11 +394,13 @@ async function workers(all: boolean): Promise<void> {
     if (!rows.length) return console.log(dim('No workers yet. Start one with `superagent dispatch "<task>"`.'));
     for (const w of rows) {
       const st = (STATUS_COLOR[w.status] ?? ((s: string) => s))(fit(w.status, 8));
+      const took = w.elapsed_ms ? duration(w.elapsed_ms) : '-';
       console.log(
-        `${bold(fit('W#' + w.id, 6))} ${st} ${dim(fit(w.agent, 9))} ${fit(w.title, 44)} ${dim(fit(w.repo ?? '-', 14))} ${dim(fit(ago(w.created_at), 8))}${w.pr_url ? ' ' + blue(w.pr_url) : ''}`,
+        `${bold(fit('W#' + w.id, 6))} ${st} ${dim(fit(w.agent, 9))} ${fit(w.title, 44)} ${dim(fit(w.repo ?? '-', 14))} ${dim(fit(took, 8))} ${dim(fit(ago(w.created_at), 8))}${w.pr_url ? ' ' + blue(w.pr_url) : ''}`,
       );
       if (w.status === 'waiting' && w.summary) console.log(yellow(`        ${String(w.summary).split('\n').pop()}`));
       else if (w.status === 'running' && w.last) console.log(dim(`        ▸ ${fit(w.last, 100).trimEnd()}`));
+      else if (w.status === 'queued' && w.waiting) console.log(dim(`        ⏸ ${w.waiting}`));
     }
   });
 }
@@ -451,9 +500,256 @@ async function diff(idArg: string | undefined, patch: boolean): Promise<void> {
   });
 }
 
+/** Files in a scratch folder (no git there). */
+function listFiles(dir: string, max = 200): string[] {
+  const files: string[] = [];
+  const walk = (d: string, rel = '') => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      if (files.length >= max || e.name === 'node_modules' || e.name === '.git') continue;
+      if (e.isDirectory()) walk(path.join(d, e.name), path.join(rel, e.name));
+      else files.push(path.join(rel, e.name));
+    }
+  };
+  walk(dir);
+  return files;
+}
+
+/** `superagent result W#3`: the worker's whole final answer, its report and what it changed, in one call. */
+async function result(idArg: string | undefined): Promise<void> {
+  await ensureRunning();
+  const id = workerRef(idArg);
+  const d = await api('GET', `/api/workers/${id.slice(2)}`);
+  const w = d.worker;
+  const runs: any[] = d.runs;
+  const last = [...runs].reverse().find((r) => r.result || r.report);
+  const report = tryJson<Record<string, any>>(last?.report ?? '') ?? {};
+  const answer = String(last?.result ?? '')
+    .replace(/<superagent-report>[\s\S]*?<\/superagent-report>/g, '')
+    .trim();
+  const ms = runs.reduce((s, r) => s + ((r.ended_at ?? Date.now()) - r.started_at), 0);
+  let files = '';
+  if (w.cwd && fs.existsSync(w.cwd)) {
+    if (w.branch) {
+      const stat = await run('git', ['-C', w.cwd, 'diff', '--stat', `${w.base}...HEAD`]);
+      const status = await run('git', ['-C', w.cwd, 'status', '--short']);
+      files = [stat.stdout.trimEnd(), status.stdout.trim() ? `not committed:\n${status.stdout.trimEnd()}` : ''].filter(Boolean).join('\n');
+    } else files = listFiles(w.cwd).join('\n');
+  }
+  const where = w.pr_url ? `PR ${w.pr_url}` : w.branch ? `branch ${w.branch} (from ${w.base})` : w.cwd ? `folder ${w.cwd}` : 'workspace archived';
+  out(
+    {
+      worker: id,
+      title: w.title,
+      status: w.status,
+      agent: w.agent,
+      elapsed_ms: ms,
+      runs: runs.length,
+      where,
+      folder: w.cwd,
+      report,
+      answer,
+      files: files ? files.split('\n') : [],
+      error: w.error,
+    },
+    () => {
+      console.log(`${bold(id)} "${w.title}" · ${(STATUS_COLOR[w.status] ?? String)(w.status)} · ${w.agent} · ${duration(ms)} over ${runs.length} run${runs.length === 1 ? '' : 's'}`);
+      console.log(dim(`  ${where}`));
+      if (report.summary) console.log(`\nReport: ${report.summary}`);
+      if (report.verified) console.log(`Verified: ${report.verified}`);
+      if (report.question) console.log(yellow(`Question: ${report.question}`));
+      if (w.error) console.log(red(`Error: ${w.error}`));
+      console.log(answer ? `\nFinal answer:\n${answer.replace(/^/gm, '  ')}` : dim('\nNo final answer yet.'));
+      if (files) console.log(`\nFiles:\n${files.replace(/^/gm, '  ')}`);
+    },
+  );
+}
+
+const SETTLED = ['done', 'failed', 'stopped', 'waiting'];
+
+/** `superagent wait W#3 [W#4 …]`: block until they finish (or need input), up to --timeout seconds. */
+async function waitFor(refs: string[], v: Record<string, any>): Promise<void> {
+  if (!refs.length) die('Usage: superagent wait <W#3> [W#4 …] [--timeout 280]');
+  const ids = refs.map(workerRef).map((r) => Number(r.slice(2)));
+  const timeout = v.timeout === undefined ? 280 : Number(v.timeout);
+  if (!Number.isFinite(timeout) || timeout < 0) die('--timeout is in seconds (0 or more)');
+  await ensureRunning();
+  const deadline = Date.now() + timeout * 1000;
+  let rows: any[] = [];
+  for (;;) {
+    const all: any[] = await api('GET', '/api/workers?archived=1');
+    rows = ids.map((n) => all.find((w) => w.id === n) ?? die(`No worker W#${n}`));
+    if (rows.every((w) => SETTLED.includes(w.status)) || Date.now() >= deadline) break;
+    await sleep(2000);
+  }
+  const pending = rows.filter((w) => !SETTLED.includes(w.status));
+  out({ settled: !pending.length, workers: rows.map((w) => ({ worker: `W#${w.id}`, status: w.status, elapsed_ms: w.elapsed_ms, summary: w.summary, pr_url: w.pr_url, error: w.error })) }, () => {
+    for (const w of rows) {
+      const what = w.status === 'waiting' ? 'needs input' : w.status;
+      const text = w.error && w.status !== 'done' ? w.error : w.summary;
+      console.log(`${bold('W#' + w.id)} ${(STATUS_COLOR[w.status] ?? String)(what)} ${dim(`(${duration(w.elapsed_ms ?? 0)})`)}${text ? `: ${snippet(text, 300)}` : ''}`);
+    }
+    if (pending.length) console.log(dim(`Still going after ${timeout} s: ${pending.map((w) => 'W#' + w.id).join(', ')}. Run wait again, or keep working: results also arrive in \`superagent events\`.`));
+    else console.log(dim('`superagent result W#n` shows a full answer. Their REPORT events still arrive in `superagent events`.'));
+  });
+  // 0: all finished well · 1: one failed or was stopped · 2: still running at the timeout
+  if (pending.length) process.exitCode = 2;
+  else if (rows.some((w) => w.status === 'failed' || w.status === 'stopped')) process.exitCode = 1;
+}
+
+/**
+ * `superagent merge W#3 W#4 [--into main]`: merge workers' branches, in order, into a branch of the
+ * user's own repository folder. It never pushes, needs a clean tree, and stops (with the merge undone)
+ * at the first conflict.
+ */
+async function merge(refs: string[], into: string | undefined): Promise<void> {
+  if (!refs.length) die('Usage: superagent merge <W#3> [W#4 …] [--into <branch>]');
+  await ensureRunning();
+  const ids = refs.map(workerRef);
+  const details: any[] = [];
+  for (const id of ids) details.push(await api('GET', `/api/workers/${id.slice(2)}`));
+  for (const [i, d] of details.entries()) {
+    const w = d.worker;
+    if (!w.branch || !w.repo) die(`${ids[i]} worked in a scratch folder (${w.cwd}); there is no branch to merge.`);
+    if (d.active || ['queued', 'running'].includes(w.status)) die(`${ids[i]} is still ${w.status}; wait for it first (\`superagent wait ${ids[i]}\`).`);
+    if (w.pr_url) die(`${ids[i]} has a pull request (${w.pr_url}); merge that on GitHub instead.`);
+    if (w.cwd && fs.existsSync(w.cwd)) {
+      const s = await run('git', ['-C', w.cwd, 'status', '--porcelain']);
+      if (s.stdout.trim()) die(`${ids[i]} has uncommitted changes in ${w.cwd}, which a merge would leave out. Run \`superagent tell ${ids[i]} "Commit your work"\` first.`);
+    }
+  }
+  const repoNames = [...new Set(details.map((d) => d.worker.repo))];
+  if (repoNames.length > 1) die(`These workers are in different repositories (${repoNames.join(', ')}); merge each repository's workers separately.`);
+  const cfg = await api<{ repos: { name: string; path?: string }[] }>('GET', '/api/config');
+  const repo = cfg.repos.find((r) => r.name === repoNames[0]);
+  if (!repo?.path) die(`${repoNames[0]} is a GitHub clone that SuperAgent manages, not a folder of yours; have the workers open pull requests instead.`);
+  const dir = repo.path;
+  const git = (...a: string[]) => run('git', ['-C', dir, ...a], { timeoutMs: 120_000 });
+  if ((await git('status', '--porcelain', '--untracked-files=no')).stdout.trim()) die(`${dir} has uncommitted changes; commit or stash them first.`);
+  const current = (await git('rev-parse', '--abbrev-ref', 'HEAD')).stdout.trim();
+  if (!into && current === 'HEAD') die(`${dir} is not on a branch (detached HEAD); name one with --into <branch>.`);
+  const target = into || current;
+  if (target !== current) {
+    const co = await git('checkout', target);
+    if (co.code !== 0) die(`Could not switch ${dir} to ${target}: ${(co.stderr || co.stdout).trim().slice(0, 300)}`);
+  }
+  const merged: string[] = [];
+  const skipped: string[] = [];
+  for (const [i, d] of details.entries()) {
+    const w = d.worker;
+    if ((await git('rev-parse', '--verify', '--quiet', `refs/heads/${w.branch}`)).code !== 0) die(`${ids[i]}'s branch ${w.branch} is not in ${dir}.`);
+    if ((await git('rev-list', '--count', `${target}..${w.branch}`)).stdout.trim() === '0') {
+      skipped.push(ids[i]);
+      continue;
+    }
+    const m = await git('merge', '--no-ff', '--no-edit', '-m', `Merge ${ids[i]}: ${w.title}`, w.branch);
+    if (m.code !== 0) {
+      const conflicts = (await git('diff', '--name-only', '--diff-filter=U')).stdout.trim().split('\n').filter(Boolean);
+      await git('merge', '--abort');
+      const before = merged.length ? `${merged.join(', ')} ${merged.length === 1 ? 'was' : 'were'} merged before it` : 'nothing was merged';
+      die(
+        `${ids[i]} (${w.branch}) conflicts with ${target}${conflicts.length ? ` in ${conflicts.join(', ')}` : ''}: ${(m.stderr || m.stdout).trim().split('\n')[0]}. ` +
+          `That merge was undone; ${before}. To resolve it, dispatch a worker: superagent dispatch "Merge branch ${w.branch} into this branch and resolve the conflicts" --repo ${repo.name} --base ${target}`,
+      );
+    }
+    merged.push(ids[i]);
+  }
+  const head = (await git('log', '-1', '--format=%h %s')).stdout.trim();
+  out({ ok: true, into: target, folder: dir, merged, skipped, head }, () => {
+    console.log(merged.length ? `${green('✓')} Merged ${merged.join(', ')} into ${bold(target)} in ${dir} ${dim(`(now at ${head}; not pushed)`)}` : dim(`Nothing to merge into ${target}.`));
+    if (skipped.length) console.log(dim(`  Already in ${target}: ${skipped.join(', ')}`));
+  });
+}
+
+/** The folder (and page) a preview or serve is about: a worker's workspace, or a path. */
+async function targetFolder(target: string | undefined, usage: string): Promise<{ root: string; label: string }> {
+  if (!target) die(`Usage: ${usage}`);
+  if (/^w\s*#?\s*\d+$/i.test(target)) {
+    await ensureRunning();
+    const id = workerRef(target);
+    const { worker: w } = await api('GET', `/api/workers/${id.slice(2)}`);
+    if (!w.cwd || !fs.existsSync(w.cwd)) die(`${id}'s workspace is gone (archived).`);
+    return { root: w.cwd, label: `w${id.slice(2)}` };
+  }
+  const root = path.resolve(target);
+  if (!fs.existsSync(root)) die(`${root} does not exist`);
+  return { root, label: '' };
+}
+
+const PREVIEW_USAGE = 'superagent preview <W#3|path> [file] [--width 375,1280] [--height 800] [--full] [--dark] [--out shot.png]';
+
+/** `superagent preview`: what a web result really looks like at a phone or desktop width. */
+async function previewCmd(target: string | undefined, file: string | undefined, v: Record<string, any>): Promise<void> {
+  const { root, label } = await targetFolder(target, PREVIEW_USAGE);
+  const page = pageIn(root, file);
+  const widths = list(v.width ?? '375').map(Number);
+  if (!widths.length || widths.some((w) => !Number.isInteger(w) || w < 200 || w > 4000)) die('--width is in pixels, 200 to 4000 (several: --width 375,1280)');
+  if (v.out && widths.length > 1) die('--out names one file; leave it out to screenshot several widths');
+  const heightArg = v.height === undefined ? 0 : Number(v.height);
+  if (!Number.isInteger(heightArg) || heightArg < 0 || heightArg > 8000) die('--height is in pixels, up to 8000');
+  // Pages load over http, as on a real site: modules, fetch() and service workers don't work from file://.
+  const base = fs.statSync(root).isDirectory() ? root : path.dirname(page);
+  let server: Awaited<ReturnType<typeof serve>> | null = null;
+  let url = fileUrl(page);
+  try {
+    server = await serve(base, 0);
+    url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/${path.relative(base, page).split(path.sep).map(encodeURIComponent).join('/')}`;
+  } catch {
+    /* no local port here (a sandbox): fall back to file:// */
+  }
+  let dir = path.join(paths.home, 'previews');
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.accessSync(dir, fs.constants.W_OK);
+  } catch {
+    dir = path.join(os.tmpdir(), 'superagent-previews'); // a worker's sandbox may not reach the data folder
+  }
+  const name = [label, slugify(path.basename(path.dirname(page)), 30), slugify(path.basename(page, path.extname(page)), 30)].filter(Boolean).join('-');
+  const shots: PreviewResult[] = [];
+  try {
+    for (const width of widths) {
+      const height = heightArg || (width < 600 ? 812 : 900);
+      const outFile = v.out ? path.resolve(String(v.out)) : path.join(dir, `${name}-${width}${v.dark ? '-dark' : ''}.png`);
+      shots.push(await preview({ url, file: page, out: outFile, width, height, full: !!v.full, dark: !!v.dark }));
+    }
+  } finally {
+    server?.close();
+  }
+  const errors = [...new Set(shots.flatMap((s) => s.errors))];
+  out({ page, url, screenshots: shots.map((s) => ({ file: s.screenshot, width: s.width, height: s.height, dark: s.dark })), errors }, () => {
+    console.log(`${bold(page)}`);
+    for (const s of shots) console.log(`  ${s.width}×${s.height}${s.dark ? ' dark' : ''}: ${s.screenshot}`);
+    console.log(errors.length ? red(`Page errors (${errors.length}):\n${errors.map((e) => `  ${e}`).join('\n')}`) : green('No page errors.'));
+    console.log(dim('Open the PNG files to look at them.'));
+  });
+}
+
+/** `superagent serve`: a local web server for a worker's folder, for checking a result by hand. */
+async function serveCmd(target: string | undefined, v: Record<string, any>): Promise<void> {
+  const { root } = await targetFolder(target, 'superagent serve <W#3|path> [--port 8080]');
+  const port = v.port === undefined ? 0 : Number(v.port);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) die('--port is a number from 1 to 65535');
+  const isDir = fs.statSync(root).isDirectory();
+  const base = isDir ? root : path.dirname(root);
+  let server;
+  try {
+    server = await serve(base, port);
+  } catch (e) {
+    die(`Could not serve on port ${port}: ${(e as Error).message}`);
+  }
+  let page = '';
+  try {
+    page = path.relative(base, pageIn(root)).split(path.sep).map(encodeURIComponent).join('/');
+  } catch {
+    /* no HTML file: serve the folder anyway */
+  }
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/${page}`;
+  out({ url, folder: base }, () => console.log(`Serving ${base}\n  ${bold(url)}\n${dim('Ctrl+C to stop.')}`));
+  await new Promise(() => {});
+}
+
 async function graph(v: Record<string, any>): Promise<void> {
   await ensureRunning();
-  const g = await api('GET', '/api/graph');
+  const g = await api('GET', `/api/graph${v.all ? '?all=1' : ''}`);
   if (asJson) return console.log(JSON.stringify({ router: g.router, workers: g.workers, threads: g.threads }, null, 2));
   console.log(v.mermaid ? g.mermaid : g.tree);
 }
@@ -595,7 +891,7 @@ function printIntegrations(): void {
   }
 }
 
-async function doctor(): Promise<void> {
+async function doctor(deep = false): Promise<void> {
   const checks: { level: 'ok' | 'warn' | 'bad'; message: string; hint?: string }[] = [];
   const add = (level: 'ok' | 'warn' | 'bad') => (message: string, hint?: string) => {
     checks.push({ level, message, ...(hint ? { hint } : {}) });
@@ -624,6 +920,29 @@ async function doctor(): Promise<void> {
     else ok(`${a.label} ${a.version}${s?.signedIn ? ', signed in' : ''}`);
   });
   if (!found.some((a) => a.installed)) bad('No coding agent installed', `install one of: ${AGENT_IDS.join(', ')}`);
+  if (deep) {
+    // A saved login can be stale while the agent's own status still says "logged in": ask each one for a word.
+    const cfg = loadConfig();
+    for (const [i, a] of found.entries()) {
+      const adapter = ADAPTERS[a.id];
+      if (!a.installed || !adapter || signIns[i]?.signedIn === false) continue;
+      if (!asJson) process.stdout.write(dim(`  asking ${a.label} for a test reply…\r`));
+      const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'superagent-doctor-'));
+      const started = Date.now();
+      try {
+        const res = await startWorkerRun(
+          adapter,
+          { cwd, prompt: 'Reply with the single word OK.', session: null, model: cfg.agents[a.id as keyof typeof cfg.agents]?.model ?? '', system: '', autonomy: 'safe', writableDirs: [] },
+          () => {},
+          120_000,
+        ).done;
+        if (res.error) bad(`${a.label} failed a test call`, snippet(res.error, 200));
+        else ok(`${a.label} answered a test call in ${duration(Date.now() - started)}`);
+      } finally {
+        fs.rmSync(cwd, { recursive: true, force: true, maxRetries: 3 });
+      }
+    }
+  }
   const skill = integrationStatus();
   if (!asJson) {
     console.log(bold('Skill'));
@@ -782,6 +1101,22 @@ const CLI_OPTIONS = {
       name: { type: 'string' },
       allow: { type: 'string' },
       all: { type: 'boolean' },
+      after: { type: 'string' },
+      verify: { type: 'string' },
+      timeout: { type: 'string' },
+      into: { type: 'string' },
+      width: { type: 'string' },
+      height: { type: 'string' },
+      dark: { type: 'boolean' },
+      full: { type: 'boolean' },
+      out: { type: 'string' },
+      port: { type: 'string' },
+      force: { type: 'boolean' },
+      'when-idle': { type: 'boolean' },
+      'dry-run': { type: 'boolean' },
+      peek: { type: 'boolean' },
+      again: { type: 'boolean' },
+      deep: { type: 'boolean' },
       live: { type: 'boolean', short: 'f' },
       json: { type: 'boolean' },
       foreground: { type: 'boolean' },
@@ -842,6 +1177,7 @@ export async function main(argv: string[]): Promise<void> {
       case 'stop':
         return stop();
       case 'restart':
+        await restartGuard(v);
         await stop(true);
         return start(false);
       case 'status':
@@ -865,10 +1201,18 @@ export async function main(argv: string[]): Promise<void> {
             reply_thread: v.reply ? threadRef(String(v.reply)) : undefined,
             silent: !!v.silent,
             base: v.base,
+            after: v.after ? workerRef(String(v.after)) : undefined,
+            verify: v.verify,
           },
           (r) => {
             const place = r.repo ? dim(` · repo ${r.repo}`) : dim(' · scratch folder');
-            if (r.status === 'queued') console.log(`${yellow('⏸')} Queued ${bold(r.worker)} ${dim(`(${r.agent})`)} ${r.title}${place} ${dim(`(${r.running}/${r.max} slots busy; it starts when one frees up)`)}`);
+            const why =
+              r.waiting_for === 'after'
+                ? `${r.waiting_detail}; it starts when that is done`
+                : r.waiting_for === 'memory'
+                  ? `waiting for memory: ${r.waiting_detail}`
+                  : `${r.running}/${r.max} slots busy; it starts when one frees up`;
+            if (r.status === 'queued') console.log(`${yellow('⏸')} Queued ${bold(r.worker)} ${dim(`(${r.agent})`)} ${r.title}${place} ${dim(`(${why})`)}`);
             else console.log(`${green('▶')} Started ${bold(r.worker)} ${dim(`(${r.agent})`)} ${r.title}${place}`);
             if (r.follows.length) console.log(dim(`  follows ${r.follows.join(', ')}: new events there go straight to it`));
             const where = r.reports_to_user ? '' : ` (its reply thread is ${r.reply_thread})`;
@@ -882,8 +1226,10 @@ export async function main(argv: string[]): Promise<void> {
           (r) =>
             console.log(
               r.interrupted
-                ? `${green('✓')} Interrupted ${r.worker}; it resumes right away with this message.`
-                : `${green('✓')} Sent to ${r.worker}. It reads it when its current run ends (add --now to interrupt).`,
+                ? `${green('✓')} Interrupted ${r.worker}: the step it was on${r.discarded_ms ? ` (running ${duration(r.discarded_ms)})` : ''} is redone, now with this message.`
+                : r.was_running
+                  ? `${green('✓')} Sent to ${r.worker}. It reads it when its current run ends (--now interrupts it, and the step in progress is redone).`
+                  : `${green('✓')} ${r.worker} resumes now with this message.`,
             ),
         );
       case 'cancel':
@@ -953,11 +1299,30 @@ export async function main(argv: string[]): Promise<void> {
         await ensureRunning();
         const days = v.days === undefined ? 7 : Number(v.days);
         if (!Number.isFinite(days) || days < 0) die('Usage: superagent cleanup [--days N] (N is 0 or more)');
-        const r = await api('POST', '/api/workers/cleanup', { days });
-        return out(r, () => console.log(r.archived.length ? `${green('✓')} Archived ${r.archived.join(', ')} (finished more than ${days} days ago; branches and PRs stay)` : dim(`Nothing to clean up: no finished worker is older than ${days} days.`)));
+        const dryRun = !!v['dry-run'];
+        const r = await api('POST', '/api/workers/cleanup', { days, dryRun });
+        return out(r, () =>
+          console.log(
+            !r.archived.length
+              ? dim(`Nothing to clean up: no finished worker is older than ${days} days.`)
+              : dryRun
+                ? `Would archive ${r.archived.join(', ')} (finished more than ${days} days ago). Nothing was changed.`
+                : `${green('✓')} Archived ${r.archived.join(', ')} (finished more than ${days} days ago; branches and PRs stay)`,
+          ),
+        );
       }
       case 'diff':
         return diff(rest[0], !!v.patch);
+      case 'result':
+        return result(rest[0]);
+      case 'wait':
+        return waitFor(rest, v);
+      case 'merge':
+        return merge(rest, v.into);
+      case 'preview':
+        return previewCmd(rest[0], rest[1], v);
+      case 'serve':
+        return serveCmd(rest[0], v);
       case 'activity':
         return activity();
 
@@ -988,7 +1353,7 @@ export async function main(argv: string[]): Promise<void> {
         return out({ autostart: on }, () => console.log(`Autostart is ${on ? 'on' : 'off'}`));
       }
       case 'doctor':
-        return doctor();
+        return doctor(!!v.deep);
       case 'claude':
         return launchClaude(rest.join(' ').trim());
       case 'hook':

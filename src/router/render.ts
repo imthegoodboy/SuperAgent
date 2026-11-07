@@ -48,7 +48,7 @@ export function renderTrigger(app: App, t: TriggerRow): string {
     } · reply thread ${ref.TH(replyTh?.id ?? app.store.localThread().id)}`;
     const pr = meta.pr_url || w?.pr_url; // a follow-up run reports no new PR, but the old one is still the PR
     const where = !pr && w?.cwd ? (w.branch ? `branch ${w.branch}${w.repo ? ` in ${w.repo}` : ''} (no PR; \`superagent diff ${ref.W(w.id)}\`)` : `files in ${w.cwd}`) : '';
-    const extra = [pr ? `PR: ${pr}` : where, meta.question && !t.text.includes(meta.question) ? `question: ${snippet(meta.question, 400)}` : '', meta.error ? `error: ${snippet(meta.error, 300)}` : '']
+    const extra = [pr ? `PR: ${pr}` : where, meta.verified ? `verified: ${snippet(meta.verified, 200)}` : '', meta.question && !t.text.includes(meta.question) ? `question: ${snippet(meta.question, 400)}` : '', meta.error && oneLine(meta.error) !== oneLine(t.text) ? `error: ${snippet(meta.error, 300)}` : '']
       .filter(Boolean)
       .join(' · ');
     return `${head}\n  "${snippet(t.text, INLINE_EXPLICIT, `recall ${ref.W(w?.id)}`)}"${extra ? `\n  ${extra}` : ''}`;
@@ -171,9 +171,27 @@ export function renderAway(app: App, since: number): string {
   const replies = store
     .all<OutboxRow>('SELECT * FROM outbox WHERE thread_id != ? AND created_at > ? ORDER BY id DESC LIMIT 15', local, since)
     .reverse();
-  const handled = store.get<{ n: number }>("SELECT COUNT(*) AS n FROM router_turns WHERE started_at > ? AND (session IS NULL OR session != 'attached agent') AND hop = 0", since)?.n ?? 0;
-  if (!msgs.length && !replies.length && !handled) return '';
-  const lines = [`[WHILE YOU WERE AWAY] (since ${hhmm(since)} the background router was in charge; it handled ${handled} batch${handled === 1 ? '' : 'es'} of events)`];
+  // What the background router saw and did, in numbers anyone can check with `superagent activity`.
+  const turns = store.all<{ id: number; actions: string | null }>(
+    "SELECT id, actions FROM router_turns WHERE started_at > ? AND (session IS NULL OR session != 'attached agent')",
+    since,
+  );
+  const seen = turns.length
+    ? store.all<{ what: string; n: number }>(
+        `SELECT source || ' ' || REPLACE(kind, '_', ' ') AS what, COUNT(*) AS n FROM triggers WHERE router_turn_id IN (${turns.map(() => '?').join(',')}) GROUP BY what ORDER BY n DESC`,
+        ...turns.map((t) => t.id),
+      )
+    : [];
+  const acted: Record<string, number> = {};
+  for (const t of turns) for (const a of tryJson<{ type: string }[]>(t.actions ?? '[]') ?? []) acted[a.type] = (acted[a.type] ?? 0) + 1;
+  const filtered = store.get<{ n: number }>("SELECT COUNT(*) AS n FROM triggers WHERE created_at > ? AND decision = 'dropped'", since)?.n ?? 0;
+  if (!msgs.length && !replies.length && !seen.length) return '';
+  const count = (o: [string, number][]) => o.map(([k, n]) => `${k}${n > 1 ? ` ×${n}` : ''}`).join(', ');
+  const total = seen.reduce((s, x) => s + x.n, 0);
+  const summary = seen.length
+    ? `it looked at ${total} event${total === 1 ? '' : 's'} (${count(seen.map((x) => [x.what, x.n]))}) and took ${Object.keys(acted).length ? count(Object.entries(acted)) : 'no action'}`
+    : 'it had nothing to decide';
+  const lines = [`[WHILE YOU WERE AWAY] (since ${hhmm(since)} the background router was in charge: ${summary}; ${filtered} more were filtered in code)`];
   for (const m of msgs) {
     if (m.role === 'agent') lines.push(`- ${hhmm(m.created_at)} background router told the user (pass this on): "${snippet(m.text, 400)}"`);
     else if (m.role === 'system') lines.push(`- ${hhmm(m.created_at)} ${snippet(m.text, 200)}`);
@@ -208,15 +226,16 @@ export interface Graph {
   threads: { id: string; source: string; title: string; url: string | null }[];
 }
 
-export function graphData(app: App): Graph {
+export function graphData(app: App, all = false): Graph {
   const { store } = app;
   const lease = app.router.lease();
   const st = app.router.status();
-  const dayAgo = Date.now() - 24 * 3_600_000;
+  // Now: what is active, and what finished in the last 3 hours (`graph --all`: the last week).
+  const recent = Date.now() - (all ? 7 * 24 : 3) * 3_600_000;
   const workers = store
-    .listWorkers('current', 60)
-    .filter((w) => ACTIVE.includes(w.status) || w.updated_at > dayAgo)
-    .slice(0, 15)
+    .listWorkers('current', 200)
+    .filter((w) => ACTIVE.includes(w.status) || w.updated_at > recent)
+    .slice(0, all ? 50 : 15)
     .sort((a, b) => a.id - b.id);
   const threads = new Map<number, ThreadRow>();
   const local = store.localThread().id;
@@ -249,7 +268,7 @@ export function graphData(app: App): Graph {
 export function renderGraphTree(g: Graph): string {
   const titles = new Map(g.threads.map((t) => [t.id, `${t.id} ${t.source} "${snippet(t.title, 60)}"`]));
   const lines = [`Router: ${g.router.label}${g.router.busy ? ' · thinking' : ''}`];
-  if (!g.workers.length) lines.push('└─ no workers in the last 24 hours');
+  if (!g.workers.length) lines.push('└─ nothing active or finished in the last 3 hours (graph --all for more)');
   g.workers.forEach((w, i) => {
     const last = i === g.workers.length - 1;
     lines.push(`${last ? '└─' : '├─'} ${w.id} ${w.agent} · ${w.status} · "${snippet(w.title, 60)}"${w.repo ? ` · ${w.repo}` : ''}`);

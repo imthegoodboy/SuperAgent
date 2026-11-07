@@ -101,7 +101,12 @@ export class App {
       startedAt: this.startedAt,
       home: paths.home,
       router: this.router.status(),
-      workers: { counts, running: this.workers.runningCount, max: this.config.workers.maxConcurrent },
+      workers: {
+        counts,
+        running: this.workers.runningCount,
+        max: this.config.workers.maxConcurrent,
+        queued: workers.filter((w) => w.status === 'queued').map((w) => ({ id: w.id, why: this.workers.queueReason(w)?.detail ?? null })),
+      },
       agents: this.agents,
       github: this.github.status(),
       telegram: this.telegram.status(),

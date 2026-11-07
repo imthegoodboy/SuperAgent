@@ -5,6 +5,7 @@
  *   node mock-agent.js worker [--resume id]   -> does a fake task, writes a file, prints a report
  *   node mock-agent.js router [--resume id]   -> answers router turns with simple deterministic actions
  */
+import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 
@@ -81,18 +82,25 @@ async function main(): Promise<void> {
   out({ type: 'assistant', message: { content: [{ type: 'text', text: `Working on: ${title}` }] } });
   out({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'git status --short' } }] } });
   out({ type: 'user', message: { content: [{ type: 'tool_result', content: 'clean' }] } });
-  out({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Write', input: { file_path: 'mock-output.txt' } }] } });
-  fs.writeFileSync('mock-output.txt', `mock agent was here\n${title}\n`);
+  // "FILE:name" picks the file it writes; "COMMIT:" commits it (tests that merge workers' branches).
+  const file = input.match(/\bFILE:(\S+)/)?.[1] ?? 'mock-output.txt';
+  out({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Write', input: { file_path: file } }] } });
+  fs.writeFileSync(file, `mock agent was here\n${title}\n`);
   out({ type: 'user', message: { content: [{ type: 'tool_result', content: 'File written' }] } });
+  if (/\bCOMMIT:/.test(input)) {
+    execFileSync('git', ['add', file]);
+    execFileSync('git', ['-c', 'user.name=mock', '-c', 'user.email=mock@example.com', 'commit', '-q', '-m', `mock: ${title}`]);
+  }
   await new Promise((r) => setTimeout(r, delay + slow(input)));
-  if (process.env.MOCK_FAIL === '1') {
+  // MOCK_FAIL=1 fails every task; "FAIL:" in a task fails just that one.
+  if (process.env.MOCK_FAIL === '1' || /\bFAIL:/.test(input)) {
     out({ type: 'result', subtype: 'error', is_error: true, session_id: session, result: 'mock failure' });
     process.exit(1);
   }
   // A task containing "ASK:" makes the mock stop and ask the human a question.
   const report = /\bASK:/.test(input)
     ? { status: 'needs_input', summary: 'Need a decision before going on.', question: 'Which database should I use?' }
-    : { status: 'done', summary: `Mock finished: ${title}` };
+    : { status: 'done', summary: `Mock finished: ${title}`, ...(/\nVerification: /.test(input) ? { verified: 'mock verification' } : {}) };
   out({
     type: 'result',
     subtype: 'success',

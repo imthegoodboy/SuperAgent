@@ -280,7 +280,8 @@ export const cursor: AgentAdapter = {
   label: 'Cursor Agent',
   auth: {
     args: ['status'],
-    signedIn: (out) => (/not logged in|authentication required|login required/i.test(out) ? false : /logged in/i.test(out) ? true : null),
+    // "Logged in (unable to fetch user details)" means the saved login is stale: every task fails.
+    signedIn: (out) => (/not logged in|authentication required|login required|unable to fetch user details/i.test(out) ? false : /logged in/i.test(out) ? true : null),
     login: 'cursor-agent login',
   },
   command: 'cursor-agent',

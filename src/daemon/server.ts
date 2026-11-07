@@ -43,6 +43,11 @@ function id(params: string[], i = 0): number {
   return n;
 }
 
+/** Time a worker's agent has spent on its runs so far. */
+function elapsed(app: App, id: number): number {
+  return app.store.get<{ ms: number }>('SELECT COALESCE(SUM(COALESCE(ended_at, ?) - started_at), 0) AS ms FROM worker_runs WHERE worker_id = ?', Date.now(), id)?.ms ?? 0;
+}
+
 function requireWorker(app: App, n: number) {
   const w = app.store.workerById(n);
   if (!w) throw new HttpError(404, `no worker ${ref.W(n)}`);
@@ -88,6 +93,8 @@ route('POST', '/api/router/detach', ({ app, req }) =>
   }),
 );
 route('GET', '/api/router/events', ({ app, query, signal, req }) => {
+  if (query.get('peek')) return asRouter(() => ({ text: app.router.pendingText(sessionOf(req)) }));
+  if (query.get('again')) return asRouter(() => ({ text: app.router.lastBatch(sessionOf(req)) }));
   // fetch() gives up on a response after 300 s, so long polls stay below that.
   const wait = Math.min(280, Math.max(0, Number(query.get('wait')) || 0));
   return asRouter(() => app.router.events(wait * 1000, signal, sessionOf(req), whoOf(req)));
@@ -111,8 +118,8 @@ route('GET', '/api/recall', ({ app, query }) => {
   });
   return { text, missing };
 });
-route('GET', '/api/graph', ({ app }) => {
-  const g = graphData(app);
+route('GET', '/api/graph', ({ app, query }) => {
+  const g = graphData(app, !!query.get('all'));
   return { ...g, tree: renderGraphTree(g), mermaid: renderGraphMermaid(g) };
 });
 
@@ -120,8 +127,14 @@ route('GET', '/api/workers', ({ app, query }) =>
   app.store.listWorkers(query.get('archived') === 'only' ? 'archived' : query.get('archived') === '1' ? 'all' : 'current').map((w) =>
     // Active workers carry their recent event kinds so the UI can draw activity tracks right away.
     ['queued', 'running', 'waiting'].includes(w.status)
-      ? { ...w, ticks: app.store.tailLogs(w.id, 48).map((l) => l.kind), last: app.store.tailLogs(w.id, 1)[0]?.text.split('\n')[0].slice(0, 200) ?? null }
-      : w,
+      ? {
+          ...w,
+          elapsed_ms: elapsed(app, w.id),
+          ticks: app.store.tailLogs(w.id, 48).map((l) => l.kind),
+          last: app.store.tailLogs(w.id, 1)[0]?.text.split('\n')[0].slice(0, 200) ?? null,
+          waiting: app.workers.queueReason(w)?.detail ?? null,
+        }
+      : { ...w, elapsed_ms: elapsed(app, w.id) },
   ),
 );
 route('GET', '/api/workers/:id', ({ app, params }) => {
@@ -162,7 +175,8 @@ route('POST', '/api/workers/:id/retry', ({ app, params }) => {
 route('POST', '/api/workers/cleanup', async ({ app, body }) => {
   const days = Number(body?.days ?? 7);
   if (!Number.isFinite(days) || days < 0) throw new HttpError(400, 'days must be 0 or more');
-  const archived = await app.workers.cleanup(days);
+  const archived = await app.workers.cleanup(days, !!body?.dryRun);
+  if (body?.dryRun) return { archived: archived.map((id) => ref.W(id)), dryRun: true };
   // Worktrees whose folders are gone (deleted by hand, say) are forgotten by git too.
   for (const repo of app.config.repos) {
     const dir = repo.path ?? (repo.slug ? path.join(paths.repos, ...repo.slug.split('/')) : null);

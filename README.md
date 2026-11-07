@@ -146,10 +146,14 @@ Your agent uses these through the skill. You can run them yourself too.
 
 | Command | What it does |
 |---|---|
-| `superagent dispatch "<task>"` | Start a worker (`--agent codex`, `--repo .`, `--title …`) |
+| `superagent dispatch "<task>"` | Start a worker (`--agent codex`, `--repo .`, `--after W#3`, `--verify browser`) |
 | `superagent events` | New results, questions and GitHub activity |
 | `superagent workers` | What every worker is doing |
+| `superagent result W#4` | A worker's full answer and the files it changed |
 | `superagent diff W#4` | What a worker changed (`--patch` for the full diff) |
+| `superagent preview W#4` | Screenshots of a web result at phone and desktop width, plus page errors |
+| `superagent merge W#4 W#5` | Merge workers' local branches in order (never pushes) |
+| `superagent wait W#4` | Wait until a worker finishes |
 | `superagent logs W#4 -f` | Follow a worker live |
 | `superagent tell W#4 "<text>"` | Give a worker more instructions |
 | `superagent cancel W#4` · `retry W#4` | Stop a worker, or run it again |
@@ -183,8 +187,10 @@ Every command accepts `--json`.
 |---|---|
 | Something isn't working | `superagent doctor` (also checks each agent is signed in) |
 | Changed `port` | `superagent restart`; until then the service keeps its old port |
+| An agent's workers fail at once | `superagent doctor --deep` makes a tiny real call to each agent (finds stale logins) |
+| `preview` finds no browser | Install Chrome or Edge, or set `SUPERAGENT_BROWSER` to its path |
 | A worker seems stuck | `superagent logs W#4`, then `superagent retry W#4` |
-| Just upgraded | `superagent restart`, so the background service runs the new version |
+| Just upgraded | `superagent restart --when-idle`, so the background service runs the new version |
 | GitHub events don't arrive | `gh auth status`; check `superagent activity` to see why an event was skipped |
 | Service logs | `superagent logs` (or `~/.superagent/logs/`) |
 

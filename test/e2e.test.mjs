@@ -82,9 +82,18 @@ before(async () => {
   token = fs.readFileSync(path.join(home, 'token'), 'utf8').trim();
 });
 
-after(() => {
-  daemon?.kill();
-  fs.rmSync(home, { recursive: true, force: true, maxRetries: 5 });
+after(async () => {
+  // Windows keeps the database locked until the daemon has really exited.
+  if (daemon && daemon.exitCode === null) {
+    const exited = new Promise((r) => daemon.once('exit', r));
+    daemon.kill();
+    await Promise.race([exited, new Promise((r) => setTimeout(r, 5000))]);
+  }
+  try {
+    fs.rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  } catch {
+    /* a worker process can still hold a file for a moment; it is a temp folder */
+  }
 });
 
 test('rejects calls without the token, and foreign Host / Origin; serves no pages', async () => {
@@ -156,6 +165,8 @@ test('without an attached agent the background router handles events, and the ne
   const attach = await call('POST', '/api/router/attach', {});
   assert.match(attach.text, /WHILE YOU WERE AWAY/);
   assert.match(attach.text, new RegExp(`background router told the user.*${d.worker} finished`));
+  // N8: what it saw and did, in numbers, instead of "handled 155 batches".
+  assert.match(attach.text, /the background router was in charge: it looked at 1 event \(worker report\) and took reply; \d+ more were filtered in code\)/);
 });
 
 test('the lease belongs to one agent session; a replaced session is told so', async () => {
@@ -320,6 +331,8 @@ test('B7: dispatch says when a worker is only queued; recall fails for unknown i
   const c = await act({ type: 'dispatch', task: 'third', title: 'Third' });
   assert.equal(c.status, 'queued', 'both slots are busy');
   assert.equal(c.max, 2);
+  assert.equal(c.waiting_for, 'slot');
+  assert.match(c.waiting_detail, /2\/2 slots busy/);
   for (const w of [a, b, c]) await act({ type: 'stop_worker', worker: w.worker });
   const r = sa(['recall', 'W#999']);
   assert.equal(r.status, 1);
@@ -385,12 +398,12 @@ test('--base starts a worker from another branch', async () => {
   });
   assert.equal(w.base, 'feature');
   assert.equal(git('rev-parse', w.branch), git('rev-parse', 'feature'), 'the worker branch starts at the feature branch');
+  // N3: a wrong branch is refused at dispatch, not minutes later when the worker starts.
+  const before = (await call('GET', '/api/workers')).length;
   const wrong = await act({ type: 'dispatch', task: 'x', repo: 'based', base: 'no-such-branch' });
-  const failed = await until(async () => {
-    const x = await worker(wrong.worker);
-    return x.status === 'failed' ? x : null;
-  });
-  assert.match(failed.error, /base "no-such-branch" is not a branch in based/);
+  assert.equal(wrong.ok, false);
+  assert.match(wrong.error, /base "no-such-branch" is not a branch in based/);
+  assert.equal((await call('GET', '/api/workers')).length, before, 'no worker was created');
 });
 
 test('review fixes: --base needs a repo, unicode folders, option values that start with "-"', async () => {
@@ -499,6 +512,7 @@ test('workers cannot use router commands', () => {
   assert.match(r.stderr, /You are SuperAgent worker W#1/);
   assert.equal(sa(['stop'], { SUPERAGENT_WORKER: 'W#1' }).status, 1, 'a worker cannot stop the service');
   assert.equal(sa(['config', 'set', 'workers.maxConcurrent', '9'], { SUPERAGENT_WORKER: 'W#1' }).status, 1);
+  assert.equal(sa(['merge', 'W#1'], { SUPERAGENT_WORKER: 'W#1' }).status, 1, 'a worker cannot merge branches');
   assert.equal(sa(['workers'], { SUPERAGENT_WORKER: 'W#1' }).status, 0, 'read-only commands still work');
 });
 
@@ -524,4 +538,154 @@ test('`superagent claude` opens Claude Code as the router, with no editing tools
   assert.deepEqual(args.slice(allow + 1, allow + 3), ['Bash(superagent *)', 'Bash(superagent)']);
   assert.match(args[args.indexOf('--append-system-prompt') + 1], /router of SuperAgent/);
   assert.match(args.at(-1), /then handle this: fix the login bug$/);
+});
+
+
+/** A local repo with one commit on main, configured under `name`. */
+async function localRepo(name) {
+  const dir = path.join(home, `${name}-repo`);
+  fs.mkdirSync(dir);
+  const git = (...a) => execFileSync('git', ['-C', dir, '-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { stdio: 'pipe' }).toString().trim();
+  git('init', '-q', '-b', 'main');
+  git('commit', '-q', '--allow-empty', '-m', 'init');
+  const cfg = await call('GET', '/api/config');
+  await call('PUT', '/api/config', { repos: [...cfg.repos, { name, path: dir, mode: 'off' }] });
+  return { dir, git };
+}
+
+const settled = (ref, status = 'done') =>
+  until(
+    async () => {
+      const x = await worker(ref);
+      return x.status === status ? x : null;
+    },
+    90_000,
+    () => worker(ref),
+  );
+
+test('--after waits for another worker and builds on its branch; --verify reaches the task and the report', async () => {
+  const { git } = await localRepo('chain');
+  await call('POST', '/api/router/attach', { take: true });
+  const first = await act({ type: 'dispatch', task: 'SLOW: COMMIT: FILE:one.txt first part', title: 'First part', repo: 'chain' });
+  const second = await act({ type: 'dispatch', task: 'COMMIT: FILE:two.txt second part', title: 'Second part', repo: 'chain', after: first.worker, verify: 'browser' });
+  assert.equal(second.ok, true, second.error);
+  assert.equal(second.status, 'queued');
+  assert.equal(second.waiting_for, 'after');
+  assert.match(second.waiting_detail, new RegExp(`waits for ${first.worker}`));
+  await new Promise((r) => setTimeout(r, 1000));
+  assert.equal((await worker(second.worker)).status, 'queued', 'it does not start before its dependency is done');
+  const w1 = await settled(first.worker);
+  const w2 = await settled(second.worker);
+  assert.equal(w2.base, w1.branch, 'it starts from the first worker’s branch');
+  git('merge-base', '--is-ancestor', w1.branch, w2.branch); // throws if not
+  assert.match(w2.task, /Verification: Verify in a browser/);
+  const detail = await call('GET', `/api/workers/${second.worker.slice(2)}`);
+  assert.match(detail.runs[0].prompt, new RegExp(`This task follows ${first.worker} \\("First part"\\), which is done`));
+  const ev = await until(async () => {
+    const e = await call('GET', '/api/router/events?wait=2');
+    return e.text.includes(`REPORT · ${second.worker}`) ? e : null;
+  });
+  assert.match(ev.text, /verified: mock verification/);
+
+  // A dependency that fails takes its dependents with it, instead of leaving them queued forever.
+  const broken = await act({ type: 'dispatch', task: 'SLOW: FAIL: broken part', title: 'Broken part', repo: 'chain' });
+  const next = await act({ type: 'dispatch', task: 'after the broken one', title: 'Next part', repo: 'chain', after: broken.worker });
+  const failed = await settled(next.worker, 'failed');
+  assert.match(failed.error, new RegExp(`${broken.worker} ended failed`));
+  assert.match((await act({ type: 'dispatch', task: 'x', after: broken.worker })).error, /ended failed; nothing to wait for/);
+  assert.match((await act({ type: 'dispatch', task: 'x', after: 'W#9999' })).error, /unknown worker W#9999/);
+});
+
+test('result, wait, events --peek and --again, tell on a finished worker, cleanup --dry-run', async () => {
+  assert.equal(sa(['router', 'attach', '--take']).status, 0);
+  sa(['events']); // start from an empty inbox
+  const d = JSON.parse(sa(['dispatch', 'FILE:answer.txt write the answer', '--title', 'Answer', '--json']).stdout);
+  const w = sa(['wait', d.worker, '--timeout', '60']);
+  assert.equal(w.status, 0, w.stdout + w.stderr);
+  assert.match(w.stdout, new RegExp(`^${d.worker} done \\(`, 'm'));
+
+  const r = sa(['result', d.worker]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /Report: Mock finished: Answer/);
+  assert.match(r.stdout, /Final answer:\n {2}Done\./);
+  assert.match(r.stdout, /answer\.txt/);
+  assert.doesNotMatch(r.stdout, /superagent-report/, 'the report block is not repeated in the answer');
+
+  // --peek shows without handing out; events hands out and says where the batch ends; --again repeats it.
+  const report = new RegExp(`REPORT · ${d.worker}`);
+  await until(async () => report.test(sa(['events', '--peek']).stdout));
+  const ev = sa(['events']);
+  assert.match(ev.stdout, report);
+  assert.match(ev.stdout, /\[end of \d+ events?; if you did not see them all, run `superagent events --again`\]/);
+  assert.doesNotMatch(sa(['events', '--peek']).stdout, report, 'handed out once');
+  assert.match(sa(['events', '--again']).stdout, report);
+
+  const t = sa(['tell', d.worker, 'add one more line']);
+  assert.equal(t.status, 0, t.stderr);
+  assert.match(t.stdout, new RegExp(`${d.worker} resumes now with this message`));
+  await until(async () => (await call('GET', `/api/workers/${d.worker.slice(2)}`)).runs.length === 2);
+  await settled(d.worker);
+
+  const slow = JSON.parse(sa(['dispatch', 'SLOW: take a while', '--title', 'Slow', '--json']).stdout);
+  const timed = sa(['wait', slow.worker, '--timeout', '1']);
+  assert.equal(timed.status, 2, 'still running at the timeout');
+  assert.match(timed.stdout, /Still going after 1 s/);
+  await settled(slow.worker, 'running');
+  const busy = sa(['tell', slow.worker, 'note this']);
+  assert.match(busy.stdout, /reads it when its current run ends/);
+  sa(['cancel', slow.worker]);
+
+  const dry = sa(['cleanup', '--days', '0', '--dry-run']);
+  assert.equal(dry.status, 0, dry.stderr);
+  assert.match(dry.stdout, new RegExp(`Would archive .*${d.worker}`));
+  assert.equal((await worker(d.worker)).archived, 0, 'a dry run changes nothing');
+  assert.match(sa(['workers']).stdout, new RegExp(`${d.worker} +done .* \\d+s `), 'workers shows the time each took');
+});
+
+test('merge combines workers’ branches in order, and stops cleanly at a conflict', async () => {
+  const { dir, git } = await localRepo('merges');
+  await call('POST', '/api/router/attach', { take: true });
+  const a = await act({ type: 'dispatch', task: 'COMMIT: FILE:a.txt add a', title: 'Add a', repo: 'merges' });
+  const b = await act({ type: 'dispatch', task: 'COMMIT: FILE:b.txt add b', title: 'Add b', repo: 'merges' });
+  await settled(a.worker);
+  await settled(b.worker);
+  const m = sa(['merge', a.worker, b.worker]);
+  assert.equal(m.status, 0, m.stdout + m.stderr);
+  assert.match(m.stdout, new RegExp(`Merged ${a.worker}, ${b.worker} into main`));
+  assert.ok(fs.existsSync(path.join(dir, 'a.txt')) && fs.existsSync(path.join(dir, 'b.txt')));
+  assert.equal(git('log', '-1', '--format=%s'), `Merge ${b.worker}: Add b`);
+  assert.match(sa(['merge', a.worker]).stdout, /Nothing to merge into main/);
+
+  const c = await act({ type: 'dispatch', task: 'COMMIT: FILE:same.txt one way', title: 'Same one', repo: 'merges' });
+  const d = await act({ type: 'dispatch', task: 'COMMIT: FILE:same.txt another way', title: 'Same two', repo: 'merges' });
+  await settled(c.worker);
+  await settled(d.worker);
+  const bad = sa(['merge', c.worker, d.worker]);
+  assert.equal(bad.status, 1);
+  assert.match(bad.stderr, new RegExp(`${d.worker} \\(\\S+\\) conflicts with main in same\\.txt`));
+  assert.match(bad.stderr, new RegExp(`${c.worker} was merged before it`));
+  assert.match(bad.stderr, /superagent dispatch "Merge branch/);
+  assert.equal(git('status', '--porcelain'), '', 'the conflicted merge was undone');
+
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'edited by hand\n');
+  const dirty = sa(['merge', d.worker]);
+  assert.equal(dirty.status, 1);
+  assert.match(dirty.stderr, /has uncommitted changes; commit or stash them first/);
+  git('checkout', '--', 'a.txt');
+  const scratch = await act({ type: 'dispatch', task: 'no repo here', title: 'Scratch' });
+  await settled(scratch.worker);
+  assert.match(sa(['merge', scratch.worker]).stderr, /scratch folder/);
+});
+
+test('restart asks before interrupting running workers', async () => {
+  await call('POST', '/api/router/attach', { take: true });
+  const d = await act({ type: 'dispatch', task: 'SLOW: busy for a bit', title: 'Busy' });
+  await settled(d.worker, 'running');
+  const r = sa(['restart']);
+  assert.equal(r.status, 1, 'it does not restart');
+  assert.match(r.stderr, new RegExp(`1 worker is running: ${d.worker} \\(`));
+  assert.match(r.stderr, /--when-idle/);
+  assert.ok((await fetch(`http://127.0.0.1:${port}/api/health`)).ok, 'the service kept running');
+  assert.ok(Array.isArray((await call('GET', '/api/state')).workers.queued));
+  await act({ type: 'stop_worker', worker: d.worker });
 });
