@@ -156,6 +156,23 @@ test('silent workers that do not succeed are filtered in code', () => {
   assert.equal(decide({ source: 'worker', kind: 'report', text: 'x' }, 0).decision, 'explicit');
 });
 
+test('adding a repo never clobbers another one', async () => {
+  const { addRepo } = await import('../dist/daemon/system.js');
+  const repos = [
+    { name: 'web', slug: 'acme/web', mode: 'all', ci: 'failures', allowUsers: ['me'] },
+    { name: 'api', path: '/code/api', mode: 'mentions', ci: 'failures', allowUsers: [] },
+  ];
+  const sameSlug = addRepo(repos, { name: 'web', slug: 'acme/web', path: '/code/web', mode: 'mentions', ci: 'failures', allowUsers: [] });
+  assert.equal(sameSlug.repos.length, 2, 'the same GitHub repo is updated in place');
+  assert.equal(sameSlug.repo.path, '/code/web');
+  assert.equal(sameSlug.repo.mode, 'all', 'its settings stay unless given explicitly');
+  assert.deepEqual(sameSlug.repo.allowUsers, ['me']);
+  assert.equal(addRepo(repos, { name: 'web', slug: 'acme/web', mode: 'mentions', ci: 'failures', allowUsers: [] }, { mode: 'off' }).repo.mode, 'off');
+  const other = addRepo(repos, { name: 'web', slug: 'someone/web', mode: 'mentions', ci: 'failures', allowUsers: [] });
+  assert.equal(other.repo.name, 'web-2', 'a different repo with a taken name gets a new name');
+  assert.equal(other.repos.find((r) => r.name === 'web').slug, 'acme/web');
+});
+
 test('graph renders as a tree and as mermaid', async () => {
   const { renderGraphTree, renderGraphMermaid } = await import('../dist/router/render.js');
   const g = {

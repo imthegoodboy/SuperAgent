@@ -37,7 +37,8 @@ context was reset) or the user confirms it has ended; otherwise tell the user wh
 1. **The user asks for work** → `superagent dispatch` one worker per independent task. Tell the user
    who is on it ("W#4 (Codex) is adding CSV export"). Don't wait for it.
 2. **After every user message, and before you answer "what's going on"** → `superagent events`.
-   Handle each event (below). If none, say nothing about it.
+   Handle each event (below). If none, say nothing about it. In Claude Code, a `[SuperAgent]` notice
+   on your context lists events that are waiting when the user writes; handle those the same way.
 3. **The user asks you to keep watching** (or there is nothing else to do while workers run) →
    `superagent events --wait 90` (short enough for any shell-tool timeout), handle what arrives, repeat. Stop when the user speaks.
 4. **Done for now** → `superagent router detach` (or just stop: after 15 quiet minutes the background
@@ -62,8 +63,10 @@ T#13 EXPLICIT · github comment by @alice · TH#8 github "Add CSV export" (3 eve
 IDs: `T#n` an event, `TH#n` a thread (the local thread with the user, a GitHub issue or PR, a Telegram
 chat), `W#n` a worker. Long text is cut (`… [+N chars: recall T#n]`); use `superagent recall` for the rest.
 
-- **REPORT, status=done** → tell the user the result and the PR link. If its reply thread is a GitHub or
-  Telegram thread, also `superagent reply TH#n "…"` there.
+- **REPORT, status=done** → tell the user the result and the PR link. Without a PR the report names the
+  branch (local repos) or folder (scratch work); `superagent diff W#n` shows what changed, so you can
+  summarise it and tell the user how to pick it up (for example `git merge superagent/w4-…`). If its reply
+  thread is a GitHub or Telegram thread, also `superagent reply TH#n "…"` there.
 - **REPORT, status=needs_input** → put the worker's exact question to the user, then send the answer
   with `superagent tell W#n "…"`. If it came from GitHub, ask there with `reply`.
 - **REPORT, status=failed** → say what failed; `superagent retry W#n`, or dispatch a better-briefed worker.
@@ -80,8 +83,8 @@ chat), `W#n` a worker. Long text is cut (`… [+N chars: recall T#n]`); use `sup
 ## Commands
 
 ```bash
-superagent dispatch "<task>" [--agent claude|codex|opencode|cursor] [--repo web] [--title "Short title"]
-                             [--follow TH#8,TH#9] [--reply TH#8] [--silent]
+superagent dispatch "<task>" [--agent claude|codex|opencode|cursor] [--repo web|owner/repo|.]
+                             [--title "Short title"] [--follow TH#8,TH#9] [--reply TH#8] [--silent]
 superagent tell W#3 "<new instructions or information>"   # it resumes with full memory of its task
 superagent cancel W#3 [--reason "…"]
 superagent reply TH#8 "<message>"                        # GitHub issue/PR comment, Telegram message
@@ -89,18 +92,28 @@ superagent ignore T#41 T#42 [--reason "…"]
 superagent recall T#42 TH#8 W#3                           # full objects, with the IDs they link to
 superagent follow W#3 TH#9 / superagent unfollow W#3 TH#9    # GitHub issues and PRs only
 superagent remember "<durable fact or preference>"     # memory / forget <id>
-superagent workers · superagent logs W#3 · superagent graph · superagent status · superagent activity
+superagent workers · superagent logs W#3 · superagent diff W#3 [--patch] · superagent graph
+superagent status · superagent activity
 superagent retry W#3 · superagent archive W#3
 superagent repo add <path|owner/repo> [--mode mentions|all|off] [--allow alice,bob] · superagent repo list
 ```
 
-Long or multi-line text: pass `-` and pipe it in.
+Long or multi-line text: pass `-` and pipe it in, so quotes and `$` in it are safe.
 
 ```bash
 superagent dispatch - --repo web --title "CSV export" <<'EOF'
 Add CSV export to the reports page in the web repo.
 …
 EOF
+```
+
+In PowerShell:
+
+```powershell
+@'
+Add CSV export to the reports page in the web repo.
+…
+'@ | superagent dispatch - --repo web --title "CSV export"
 ```
 
 Add `--json` to any command for structured output.
@@ -118,9 +131,16 @@ Don't split a task into steps; the worker plans. One worker per independent task
 or a change of plan for an existing task go to that worker with `tell`, even if they arrive from another
 channel. If the user changes their mind, `tell` or `cancel` the affected workers.
 
-Pick `--agent` only when the user asks for one (or a repo prefers one); otherwise omit it. Pick `--repo`
-from the configured repos when the task concerns one; without a repo the worker gets a scratch folder.
-If the user wants work in a repo that isn't configured, add it first with `superagent repo add`.
+Pick `--agent` only when the user asks for one (or a repo prefers one); otherwise omit it.
+
+Pick `--repo` when the task concerns a repository: a configured name, `owner/repo`, or a folder. For the
+project you and the user are in, use `--repo .`. A folder or `owner/repo` that isn't configured yet is
+added on first use. Without a repo the worker gets an empty scratch folder.
+
+Where a worker starts: in a repo on GitHub, from the freshly fetched default branch, so it does **not** see
+unpushed commits or uncommitted changes. In a local-only repo, from the last commit of the current branch,
+so it does not see uncommitted changes. If the task depends on them, ask the user to commit (and push),
+or describe the changes in the task.
 
 ## Rules
 
@@ -133,4 +153,4 @@ If the user wants work in a repo that isn't configured, add it first with `super
   and future sessions know them too.
 - Workers only push their own `superagent/…` branch and open draft PRs. Never ask one to merge, push to
   the main branch, or handle secrets. Never put secrets in task text.
-- If `superagent` is not found, tell the user to install it: `npm install -g github:imthegoodboy/SuperAgent`.
+- If `superagent` is not found, tell the user to install it: `npm install -g @imthegoodboy/superagent`.

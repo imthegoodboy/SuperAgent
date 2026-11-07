@@ -1,145 +1,132 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/imthegoodboy/SuperAgent/main/docs/banner.svg" alt="SuperAgent: turn the coding agent you already use into an always-on Super-agent" width="100%">
+</p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/@imthegoodboy/superagent"><img src="https://img.shields.io/npm/v/@imthegoodboy/superagent?color=5b8cff&label=npm" alt="npm"></a>
+  <a href="https://github.com/imthegoodboy/SuperAgent/actions/workflows/ci.yml"><img src="https://github.com/imthegoodboy/SuperAgent/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-8b5cf6" alt="MIT license"></a>
+</p>
+
 # SuperAgent
 
 **Turn the coding agent you already use into a Super-agent.**
 
-Install SuperAgent once. Then open Claude Code, Codex, OpenCode or Cursor and say *"use superagent"*.
-Your agent becomes the router of an always-on system. It hands each piece of work to its own
-**worker** (Claude Code, Codex, OpenCode or Cursor, each in its own git worktree) and keeps talking to
-you while they run. It follows GitHub issues, review comments and CI, and remembers everything across
-sessions. When you close the session, a background service keeps going.
+Install SuperAgent once, then tell Claude Code, Codex, OpenCode or Cursor to *"use superagent"*. Your agent
+becomes a manager of other coding agents:
 
-```sh
-npm install -g github:imthegoodboy/SuperAgent
-```
+- **It hands out work.** Each task goes to its own worker (Claude Code, Codex, OpenCode or Cursor), on its
+  own git branch (or in a scratch folder when no repository is involved), with several running at once.
+- **It keeps talking to you while they work.** Results come back as they finish.
+- **It watches GitHub for you.** It reacts to issues, review comments and failing CI, and follows up on the
+  pull requests its workers open.
+- **It remembers everything** across sessions, and keeps going in the background after you close the
+  terminal.
 
-That's the only step. The install puts the `superagent` skill into every coding agent on your computer.
-
-## What it looks like
-
-```
-you    › fix the blank screen on session switch, and have codex add CSV export to reports
-
-agent  $ superagent dispatch "Fix the blank screen when switching sessions in web…" --repo web
-       ▶ Started W#4 (claude) Fix blank screen · repo web
-       $ superagent dispatch "Add CSV export to the reports page…" --agent codex --repo web
-       ▶ Started W#5 (codex) CSV export · repo web
-       W#4 (Claude Code) is on the blank screen and W#5 (Codex) is adding CSV export.
-
-you    › how's it going?
-
-agent  $ superagent events
-       T#12 REPORT · W#4 (Claude Code) "Fix blank screen" · status=done
-         "A null session was rendered before load; fixed and tested." PR: https://github.com/you/web/pull/41
-       W#4 fixed it: a null session was rendered before load. Draft PR: github.com/you/web/pull/41.
-       W#5 is still working.
-```
-
-## How it works
-
-SuperAgent follows the design in
-[*Exploring Super-agent Design*](https://x.com/DeepSeekHarness/status/2116857257245987236) by the DeepSeek
-Harness team. Like their prototype, it is a plugin for an existing agent harness, not a new agent:
-it adds the system around the agent that a single session can't provide.
-
-```mermaid
-flowchart LR
-  U[You] <--> A["Your agent, as the router<br/>Claude Code · Codex · OpenCode · Cursor"]
-  A -- "dispatch · tell · reply" --> S[("SuperAgent service<br/>memory, events, workers")]
-  S -- "events" --> A
-  G[GitHub issues, PRs, CI] --> F{Filter in code}
-  T[Telegram] --> F
-  F -- noise --> X[(dropped)]
-  F -- "thread has a worker" --> W
-  F -- "new or addressed to it" --> S
-  S --> W["Workers: one coding agent and git worktree per task"]
-  W -- report --> S
-  B["Background router<br/>(when no agent is attached)"] -.-> S
-  D[Watchdog] -. restarts .-> S & W
-```
-
-- **Continuous.** Memory, threads and tasks live in the service, not in a chat session. Every agent
-  session that attaches sees the same history, and a request made in your terminal can be changed by a
-  comment on the pull request.
-- **Productive.** The router never does the work itself. `dispatch` starts a worker and returns at once,
-  so several tasks run in parallel and you can keep talking.
-- **Proactive.** GitHub and Telegram events are filtered in code first (allowlists, mentions, CI results).
-  Your agent sees only what matters, and plain-language policies decide the rest. New comments on a PR a
-  worker opened go straight to that worker.
-- **Persistent.** When no agent is attached, a background router (a small model, `haiku` by default)
-  handles events. The next session you open is told what happened. A separate watchdog restarts
-  anything that crashes or stalls.
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how each part of the design maps to the code.
-
-## Requirements
-
-- **Node.js 22.13 or newer** and **git**
-- **At least one coding agent**, installed and signed in:
-  [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex),
-  [OpenCode](https://opencode.ai) or [Cursor CLI](https://docs.cursor.com/en/cli)
-- **[GitHub CLI](https://cli.github.com)** signed in with `gh auth login`, for GitHub events and pull requests (optional)
+You talk to one agent; SuperAgent runs the rest.
 
 ## Install
 
 ```sh
-npm install -g github:imthegoodboy/SuperAgent
+npm install -g @imthegoodboy/superagent
 ```
 
-The install copies the skill into each agent's global skills folder:
+That's the only step. The install adds the `superagent` skill to every coding agent on your computer, and
+the background service starts by itself the first time your agent uses it.
 
-| Agent | Skill folder |
-|---|---|
-| Claude Code | `~/.claude/skills/superagent` |
-| Codex | `~/.codex/skills/superagent` (or `$CODEX_HOME`) |
-| OpenCode | reads `~/.claude/skills`; otherwise `~/.config/opencode/skills/superagent` |
-| Cursor | `~/.cursor/skills/superagent` |
+You need **Node.js 22.13+**, **git**, and at least one coding agent signed in:
+[Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex),
+[OpenCode](https://opencode.ai) or [Cursor CLI](https://docs.cursor.com/en/cli). For GitHub features, also
+sign in to the [GitHub CLI](https://cli.github.com) with `gh auth login`.
 
-If your package manager skips install scripts (`--ignore-scripts`, pnpm), the first `superagent` command
-other than `help` or `--version` installs the skill instead. Agents you install later get it the same way, and a skill you delete from one agent on purpose stays
-deleted. The background service starts
-the first time your agent uses it, and from then on it starts when you log in. `superagent doctor` checks
-everything.
+Check everything with:
+
+```sh
+superagent doctor
+```
 
 ## Use it
 
-Open your agent and ask:
+Open your agent in a project and ask in plain words:
 
-- *"use superagent: fix these three bugs in parallel"*
-- *"superagent, have Codex upgrade eslint in the web repo and Claude write the migration guide"*
-- *"superagent, watch imthegoodboy/web and handle anything addressed to you"*
-- *"what are my background tasks doing?"*
+> **use superagent:** fix the flaky login test, and have Codex add CSV export to the reports page
 
-The agent attaches as the router (`superagent router attach`) and drives everything with the
-`superagent` CLI. The skill teaches it how. On GitHub, write **`/superagent`** in an issue or comment.
-Only allowlisted GitHub users can trigger work, and the list starts with just you.
+```
+agent  ▶ Started W#4 (claude) Fix flaky login test · repo web
+       ▶ Started W#5 (codex) CSV export · repo web
+       W#4 (Claude Code) is on the login test and W#5 (Codex) is adding CSV export.
+       What's next?
+```
 
-### Commands your agent uses
+Keep working with your agent meanwhile. When a worker finishes, the agent tells you:
 
-| Command | What it does |
+```
+agent  W#4 fixed it: the test raced the session refresh; it now waits for it.
+       Draft PR: github.com/you/web/pull/41. W#5 is still working.
+```
+
+More things to ask:
+
+- *"superagent: upgrade eslint in this repo and fix the new warnings"*
+- *"superagent: have Claude write the migration guide while Codex updates the API"*
+- *"superagent: watch imthegoodboy/web and handle anything addressed to you"*
+- *"what are my background tasks doing?"* · *"what did W#4 change?"* · *"stop W#5"*
+- *"remember that we deploy on Fridays"*
+
+### Even better in Claude Code
+
+- **Results show up by themselves.** In the Claude Code session that is managing your work, finished
+  work, questions from workers and new GitHub comments appear on your next message, with no need to ask.
+  This needs a Claude Code version with skill hooks (2.1 or newer).
+- **A dedicated manager session.** Run `superagent claude` (optionally with a first request) to open Claude
+  Code as the manager. Its file-editing tools are switched off and MCP servers aren't loaded, so it hands
+  every task to a worker instead of doing it itself.
+
+  ```sh
+  superagent claude "fix the flaky login test and update the changelog"
+  ```
+
+## What it does for you
+
+| | |
 |---|---|
-| `superagent router attach` | Become the router: context, memory, and what happened while no agent was attached |
-| `superagent events [--wait 90]` | New events that need a decision: worker reports, GitHub, Telegram |
-| `superagent dispatch "<task>" --agent codex --repo web` | Start a worker (`--follow TH#8`, `--reply TH#8`, `--silent`) |
-| `superagent tell W#3 "<text>"` / `cancel W#3` | Follow up with a worker, or stop it |
-| `superagent reply TH#8 "<text>"` | Post on a GitHub issue or PR, or in a Telegram chat |
-| `superagent recall T#42 TH#8 W#3` | Read anything in full, with the IDs it links to |
-| `superagent remember "<fact>"` | Keep a long-term fact for every future session |
-| `superagent workers` / `logs W#3 -f` / `graph` | What is running, what a worker did, who works on what |
-| `superagent repo add owner/name --mode all` | Watch a repository (`--allow alice,bob` for who may trigger it) |
+| **Parallel work** | Several tasks at once, each in its own worktree and branch, never touching your checkout. |
+| **Any agent, mixed** | Pick the agent per task ("use Codex for this") or let SuperAgent choose. |
+| **Pull requests** | In GitHub repos, workers push their branch and open a **draft** PR when done (unless you turn that off). |
+| **Follow-ups** | Review comments and failing CI on a worker's PR go straight back to that worker. |
+| **GitHub on autopilot** | Write `/superagent` in an issue or comment to call it, or let it watch a repo. |
+| **Background** | Close the terminal and it keeps handling GitHub and Telegram. Next time you get a "while you were away" summary. |
+| **Memory** | Decisions and preferences are remembered for every future session. |
+| **Self-healing** | A watchdog restarts anything that crashes or gets stuck. |
 
-Every command accepts `--json`. Run `superagent help` for the rest.
+## Setup
 
-### When your session ends
+Most things work without setup. These commands are for when you want more. Your agent can run them
+for you too.
 
-A session stays the router while it reads events and acts. After 15 quiet minutes
-(`router.leaseMinutes`), or after `superagent router detach`, the background router takes over:
-it replies on GitHub and Telegram and passes follow-ups to the right workers. If the session went
-quiet without acting on the last events it was given, those events go to the background router
-instead of being lost. The next agent that attaches gets a "while you were away" summary.
+**Repositories.** Tasks for the folder you're in, or for any `owner/repo`, just work: the repository is
+added the first time. To set one up yourself, or to watch GitHub:
 
-### Telegram (optional)
+```sh
+superagent repo add .                          # this project
+superagent repo add owner/name                 # a GitHub repo (cloned on first use)
+superagent repo add owner/name --mode all      # react to every issue and comment, not only mentions
+superagent repo add owner/name --allow alice,bob   # who may trigger it on GitHub (default: only you)
+superagent repo list
+```
 
-Create a bot with [@BotFather](https://t.me/BotFather), then:
+**Settings**
+
+```sh
+superagent config set workers.maxConcurrent 4      # tasks at the same time (default 3)
+superagent config set workers.defaultAgent codex    # agent used when you don't pick one
+superagent config set workers.autonomy safe         # use each agent's own sandbox and approvals
+superagent config set workers.allowDraftPRs false   # workers commit locally, no PRs
+superagent config set router.model sonnet           # model for the background router (default haiku)
+superagent config                                   # show everything
+```
+
+**Telegram (optional).** Create a bot with [@BotFather](https://t.me/BotFather), then:
 
 ```sh
 superagent config set telegram.botToken "123456:ABC…"
@@ -147,48 +134,76 @@ superagent config set telegram.allowUsers '["your_username"]'
 superagent config set telegram.enabled true
 ```
 
-Direct messages from you go to SuperAgent; replies there are short.
+**Start at login** is turned on the first time SuperAgent starts. Change it with
+`superagent autostart off` (or `on`).
+
+## Commands
+
+Your agent uses these through the skill. You can run them yourself too.
+
+| Command | What it does |
+|---|---|
+| `superagent dispatch "<task>"` | Start a worker (`--agent codex`, `--repo .`, `--title …`) |
+| `superagent events` | New results, questions and GitHub activity |
+| `superagent workers` | What every worker is doing |
+| `superagent diff W#4` | What a worker changed (`--patch` for the full diff) |
+| `superagent logs W#4 -f` | Follow a worker live |
+| `superagent tell W#4 "<text>"` | Give a worker more instructions |
+| `superagent cancel W#4` · `retry W#4` | Stop a worker, or run it again |
+| `superagent graph` | Who is working on what |
+| `superagent remember "<fact>"` | Remember something for every future session |
+| `superagent status` · `doctor` | Check that everything is running |
+| `superagent claude` | Open Claude Code as the manager |
+| `superagent help` | All commands |
+
+Every command accepts `--json`.
 
 ## Safety
 
-- Everything runs locally. The API listens on `127.0.0.1` only, needs a token stored in your data folder,
-  and rejects requests from web pages.
-- Workers run in their own worktrees under `~/.superagent/worktrees`, never in your checkout. They are told
-  to push only their own `superagent/...` branch, open **draft** PRs, and never merge or push to your main
-  branch. These rules are instructions to the agents, not technical locks, so review PRs as you would any
-  contributor's.
-- With **full** autonomy (the default) workers run commands without asking for approval. Set
-  `superagent config set workers.autonomy safe` to use each agent's own sandbox and approval mode instead.
-- Workers can see the skill too, so they run with `SUPERAGENT_WORKER` set and router commands refuse to
-  run inside them. A worker can't start more workers.
-- On GitHub, only allowlisted users can trigger work (you, by default). Text from GitHub and Telegram is
-  marked as untrusted data, and agents are told not to follow instructions in it. That lowers the risk of
-  prompt injection but cannot rule it out, so widen the allowlist only to people you trust.
-- SuperAgent never asks for or stores your agent credentials; each agent uses its own login.
+- **It runs on your computer.** No accounts and no servers of ours. The service only listens on
+  `127.0.0.1` and needs a local key. GitHub and Telegram features talk to those services with your own
+  logins, and your coding agents use their usual providers.
+- **Your checkout is never touched.** Workers get their own worktrees under `~/.superagent/worktrees`.
+  They push only their own `superagent/...` branch, open **draft** PRs (by default), and never merge or push
+  to your main branch. Review their PRs as you would anyone's.
+- **Full autonomy is the default:** workers run commands without asking. For each agent's own sandbox
+  and approvals, run `superagent config set workers.autonomy safe`.
+- **Only you can trigger it on GitHub**, unless you add people with `--allow`. If SuperAgent can't tell who
+  you are (`gh` signed out), GitHub events stay off for that repo. Text from GitHub and Telegram is
+  treated as untrusted data.
+- SuperAgent never sees your agent logins; each agent uses its own.
 
-## Uninstall
+## Troubleshooting
+
+| Problem | Try |
+|---|---|
+| Something isn't working | `superagent doctor` |
+| A worker seems stuck | `superagent logs W#4`, then `superagent retry W#4` |
+| Just upgraded | `superagent restart`, so the background service runs the new version |
+| GitHub events don't arrive | `gh auth status`; check `superagent activity` to see why an event was skipped |
+| Service logs | `superagent logs` (or `~/.superagent/logs/`) |
+
+## Update and uninstall
 
 ```sh
-superagent uninstall                       # stops the service, removes the skill and start-at-login
-npm uninstall -g @imthegoodboy/superagent
+npm install -g @imthegoodboy/superagent@latest && superagent restart   # update
+
+superagent uninstall                         # stop it, remove the skill and start-at-login
+npm uninstall -g @imthegoodboy/superagent    # then remove the command
 ```
 
-Your data stays in `~/.superagent` until you delete it.
+Your data (tasks, memory, logs) stays in `~/.superagent` until you delete it.
 
-## Where things live
-
-Everything is in `~/.superagent` (override with `SUPERAGENT_HOME`): `config.json`, the SQLite database with
-events, tasks, memory and logs, worker folders, and `logs/daemon.log` and `logs/watchdog.log`.
-
-## Develop
+## Contributing
 
 ```sh
 git clone https://github.com/imthegoodboy/SuperAgent && cd SuperAgent
-npm install                       # builds into dist/ (local installs never touch your agents' skills)
-npm test                          # unit and end-to-end tests, no LLM calls
+npm install && npm test
 ```
 
-See [AGENTS.md](AGENTS.md) for the code layout and conventions, and [CONTRIBUTING.md](CONTRIBUTING.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md). SuperAgent follows the design in DeepSeek Harness's
+[*Exploring Super-agent Design*](https://x.com/DeepSeekHarness/status/2116857257245987236). If you want the
+internals, [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) maps it to the code.
 
 ## License
 

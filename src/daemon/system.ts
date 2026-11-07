@@ -13,6 +13,49 @@ export function slugFromRemote(url: string): string | null {
   return m ? `${m[1]}/${m[2]}` : null;
 }
 
+const samePath = (a?: string, b?: string) =>
+  !!a && !!b && (process.platform === 'win32' ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b));
+
+/**
+ * Add a repo to the list without clobbering another one. The same repository (same GitHub slug or same
+ * checkout) is updated in place, keeping its settings except the ones given explicitly. A different
+ * repository with a name that is already taken gets a numbered name.
+ */
+export function addRepo(
+  repos: RepoConfig[],
+  repo: RepoConfig,
+  explicit: { mode?: string; agent?: string; allowUsers?: string[]; name?: string } = {},
+): { repos: RepoConfig[]; repo: RepoConfig } {
+  const same = repos.find((r) => (r.slug && repo.slug && r.slug.toLowerCase() === repo.slug.toLowerCase()) || samePath(r.path, repo.path));
+  const taken = (n: string, except?: RepoConfig) => repos.some((r) => r !== except && r.name.toLowerCase() === n.toLowerCase());
+  const unique = (n: string, except?: RepoConfig) => {
+    let name = n;
+    for (let i = 2; taken(name, except); i++) name = `${n}-${i}`;
+    return name;
+  };
+  if (same) {
+    const merged = normalizeRepo({
+      ...same,
+      slug: repo.slug ?? same.slug,
+      path: repo.path ?? same.path,
+      ...(explicit.name ? { name: unique(explicit.name, same) } : {}),
+      ...(explicit.mode ? { mode: explicit.mode as SourceMode } : {}),
+      ...(explicit.agent ? { agent: explicit.agent as RepoConfig['agent'] } : {}),
+      ...(explicit.allowUsers ? { allowUsers: explicit.allowUsers } : {}),
+    });
+    return { repos: repos.map((r) => (r === same ? merged : r)), repo: merged };
+  }
+  const added = { ...repo, name: unique(repo.name) };
+  return { repos: [...repos, added], repo: added };
+}
+
+/** The configured repo whose checkout contains this folder, if any. */
+export async function repoForFolder(repos: RepoConfig[], folder: string): Promise<RepoConfig | undefined> {
+  const top = await run('git', ['-C', path.resolve(folder), 'rev-parse', '--show-toplevel']);
+  if (top.code !== 0) return undefined;
+  return repos.find((r) => samePath(r.path, top.stdout.trim()));
+}
+
 /** Turn "C:\code\app", "owner/repo" or a GitHub URL into a repo entry. */
 export async function resolveRepoInput(
   input: string,
@@ -35,12 +78,18 @@ export async function resolveRepoInput(
     repo = { slug: view.stdout.trim() || slug };
   }
   let allowUsers = opts.allowUsers;
+  let mode = opts.mode;
   if (!allowUsers && repo.slug) {
     // Safe default: only you can trigger the agent from GitHub. Widen it with `repo add --allow`.
     const me = await run('gh', ['api', 'user', '--jq', '.login'], { timeoutMs: 20_000 });
-    allowUsers = me.code === 0 && me.stdout.trim() ? [me.stdout.trim()] : [];
+    if (me.code === 0 && me.stdout.trim()) allowUsers = [me.stdout.trim()];
+    else {
+      // Unknown login: an empty allowlist would mean "anyone", so GitHub events stay off instead.
+      allowUsers = [];
+      mode = 'off';
+    }
   }
-  return normalizeRepo({ ...repo, name: opts.name, mode: opts.mode, agent: opts.agent as RepoConfig['agent'], allowUsers });
+  return normalizeRepo({ ...repo, name: opts.name, mode, agent: opts.agent as RepoConfig['agent'], allowUsers });
 }
 
 // ---------- agent integrations: the skill, installed for every coding agent here ----------
@@ -55,8 +104,6 @@ interface Target {
   /** The agent's own config folder; it exists once the agent has been used here. */
   base: string;
   command: string;
-  /** Another target whose skill folder this agent also reads (so it would see the skill twice). */
-  readsFrom?: string;
 }
 
 function targets(): Target[] {
@@ -65,8 +112,7 @@ function targets(): Target[] {
   return [
     { agent: 'claude', label: 'Claude Code', base: path.join(home, '.claude'), command: 'claude' },
     { agent: 'codex', label: 'Codex', base: process.env.CODEX_HOME || path.join(home, '.codex'), command: 'codex' },
-    // OpenCode also loads ~/.claude/skills.
-    { agent: 'opencode', label: 'OpenCode', base: path.join(xdg, 'opencode'), command: 'opencode', readsFrom: 'claude' },
+    { agent: 'opencode', label: 'OpenCode', base: path.join(xdg, 'opencode'), command: 'opencode' },
     { agent: 'cursor', label: 'Cursor', base: path.join(home, '.cursor'), command: 'cursor-agent' },
   ];
 }
@@ -88,19 +134,41 @@ export interface Integration {
   label: string;
   /** The agent is on this computer. */
   detected: boolean;
-  /** Where the skill lives for this agent (possibly another agent's folder it also reads). */
+  /** Where the skill lives for this agent. */
   path: string | null;
   /** The installed skill matches this version of SuperAgent. */
   current: boolean;
 }
 
+/**
+ * Claude Code runs hooks declared in a skill's frontmatter for the rest of a session once the skill
+ * has been used. This one shows waiting events on every user message, without the agent asking. Other
+ * agents follow the plain Agent Skills format, so only Claude Code's copy carries it.
+ */
+const CLAUDE_HOOKS = `hooks:
+  UserPromptSubmit:
+    - hooks:
+        - type: command
+          command: superagent hook prompt
+          timeout: 5
+`;
+
+const sha1 = (s: string | Buffer) => crypto.createHash('sha1').update(s).digest('hex');
+
+/** SKILL.md as installed for one agent. */
+function skillText(t: Target): string {
+  const text = fs.readFileSync(path.join(SKILL_DIR, 'SKILL.md'), 'utf8');
+  return t.agent === 'claude' ? text.replace(/^(---\r?\n[\s\S]*?\r?\n)(---\r?\n)/, `$1${CLAUDE_HOOKS}$2`) : text;
+}
+
+/** Changes whenever what we would install changes. */
 function skillHash(): string {
-  return crypto.createHash('sha1').update(fs.readFileSync(path.join(SKILL_DIR, 'SKILL.md'))).digest('hex');
+  return sha1(targets().map(skillText).join('\0'));
 }
 
 function fileHash(file: string): string | null {
   try {
-    return crypto.createHash('sha1').update(fs.readFileSync(file)).digest('hex');
+    return sha1(fs.readFileSync(file));
   } catch {
     return null;
   }
@@ -110,29 +178,29 @@ function detected(t: Target): boolean {
   return fs.existsSync(t.base) || !!which(t.command);
 }
 
-function copySkill(dest: string): void {
+function copySkill(t: Target): void {
+  const dest = skillDir(t);
   fs.mkdirSync(dest, { recursive: true });
-  for (const f of fs.readdirSync(SKILL_DIR)) fs.copyFileSync(path.join(SKILL_DIR, f), path.join(dest, f));
+  for (const f of fs.readdirSync(SKILL_DIR)) {
+    if (f === 'SKILL.md') fs.writeFileSync(path.join(dest, f), skillText(t));
+    else fs.copyFileSync(path.join(SKILL_DIR, f), path.join(dest, f));
+  }
 }
 
-/** Where each detected agent should get the skill; agents that already read another folder share it. */
-function plan(): { target: Target; dest: string; own: boolean }[] {
-  const all = targets();
-  const found = all.filter(detected);
-  return found.map((t) => {
-    const via = t.readsFrom ? found.find((o) => o.agent === t.readsFrom) : undefined;
-    return { target: t, dest: skillDir(via ?? t), own: !via };
-  });
+/** The agents on this computer, each with its own copy of the skill. */
+function plan(): { target: Target; dest: string }[] {
+  return targets()
+    .filter(detected)
+    .map((t) => ({ target: t, dest: skillDir(t) }));
 }
 
 export function integrationStatus(): Integration[] {
-  const hash = skillHash();
   const byAgent = new Map(plan().map((p) => [p.target.agent, p]));
   return targets().map((t) => {
     const p = byAgent.get(t.agent);
     const file = p ? path.join(p.dest, 'SKILL.md') : null;
     const h = file ? fileHash(file) : null;
-    return { agent: t.agent, label: t.label, detected: !!p, path: h ? p!.dest : null, current: h === hash };
+    return { agent: t.agent, label: t.label, detected: !!p, path: h ? p!.dest : null, current: h === sha1(skillText(t)) };
   });
 }
 
@@ -144,7 +212,11 @@ interface Stamp {
   autostart?: boolean;
   /** `superagent uninstall` ran: install nothing until `superagent install` or a fresh npm install. */
   uninstalled?: boolean;
+  /** 2: every agent has its own copy (before, OpenCode read Claude Code's). */
+  layout?: number;
 }
+
+const LAYOUT = 2;
 
 function readStamp(): Stamp | null {
   try {
@@ -161,9 +233,9 @@ function writeStamp(st: Stamp): void {
 
 /** Install (or refresh) the skill for every coding agent on this computer. */
 export function installIntegrations(): Integration[] {
-  for (const p of plan()) if (p.own) copySkill(p.dest);
+  for (const p of plan()) copySkill(p.target);
   const st = readStamp();
-  writeStamp({ ...st, hash: skillHash(), agents: plan().map((p) => p.target.agent), uninstalled: undefined });
+  writeStamp({ ...st, hash: skillHash(), layout: LAYOUT, agents: plan().map((p) => p.target.agent), uninstalled: undefined });
   return integrationStatus();
 }
 
@@ -185,12 +257,17 @@ export function ensureIntegrations(): void {
   const st = readStamp();
   if (st?.uninstalled) return;
   const hash = skillHash();
+  const has = (p: { dest: string }) => fs.existsSync(path.join(p.dest, 'SKILL.md'));
   const todo = plan().filter(
-    (p) => p.own && (!st?.agents.includes(p.target.agent) || (st.hash !== hash && fs.existsSync(path.join(p.dest, 'SKILL.md')))),
+    (p) =>
+      !st?.agents.includes(p.target.agent) ||
+      (st.hash !== hash && has(p)) ||
+      // Moving to one copy per agent: OpenCode never had its own folder, so this is not a removal.
+      (st.layout !== LAYOUT && p.target.agent === 'opencode' && !has(p)),
   );
-  if (st && st.hash === hash && !todo.length) return;
-  for (const p of todo) copySkill(p.dest);
-  writeStamp({ ...st, hash, agents: [...new Set([...(st?.agents ?? []), ...plan().map((p) => p.target.agent)])] });
+  if (st && st.hash === hash && st.layout === LAYOUT && !todo.length) return;
+  for (const p of todo) copySkill(p.target);
+  writeStamp({ ...st, hash, layout: LAYOUT, agents: [...new Set([...(st?.agents ?? []), ...plan().map((p) => p.target.agent)])] });
 }
 
 /** Turn on start-at-login once, the first time SuperAgent starts. Someone who turns it off keeps it off. */

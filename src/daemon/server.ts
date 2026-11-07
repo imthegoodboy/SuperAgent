@@ -5,7 +5,7 @@ import { HOME_ID, pkgVersion } from '../core/paths.js';
 import { bus, emit, ref } from '../core/util.js';
 import { graphData, renderGraphMermaid, renderGraphTree, renderRecall } from '../router/render.js';
 import { LeaseConflict, normalizeActions } from '../router/router.js';
-import { resolveRepoInput } from './system.js';
+import { addRepo, resolveRepoInput } from './system.js';
 
 // The API is for the `superagent` CLI, which agents (Claude Code, Codex, …) drive. There is no web UI.
 
@@ -87,6 +87,7 @@ route('POST', '/api/router/actions', ({ app, body, req }) => {
   if (!actions.length) throw new HttpError(400, 'no actions');
   return asRouter(() => app.router.act(actions, sessionOf(req)));
 });
+route('GET', '/api/router/peek', ({ app, req }) => app.router.peek(sessionOf(req)));
 route('GET', '/api/recall', ({ app, query }) => {
   const ids = String(query.get('ids') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
   if (!ids.length) throw new HttpError(400, 'ids is required, e.g. ids=W#3,TH#8');
@@ -101,7 +102,7 @@ route('GET', '/api/workers', ({ app, query }) =>
   app.store.listWorkers(query.get('archived') === 'only' ? 'archived' : query.get('archived') === '1' ? 'all' : 'current').map((w) =>
     // Active workers carry their recent event kinds so the UI can draw activity tracks right away.
     ['queued', 'running', 'waiting'].includes(w.status)
-      ? { ...w, ticks: app.store.tailLogs(w.id, 48).map((l) => l.kind) }
+      ? { ...w, ticks: app.store.tailLogs(w.id, 48).map((l) => l.kind), last: app.store.tailLogs(w.id, 1)[0]?.text.split('\n')[0].slice(0, 200) ?? null }
       : w,
   ),
 );
@@ -169,9 +170,14 @@ route('POST', '/api/repos', async ({ app, body }) => {
       agent: body?.agent || undefined,
       allowUsers: Array.isArray(body?.allowUsers) ? body.allowUsers.map(String) : undefined,
     });
-    const repos = app.config.repos.filter((r) => r.name.toLowerCase() !== repo.name.toLowerCase());
-    app.updateConfig({ repos: [...repos, repo] });
-    return repo;
+    const added = addRepo(app.config.repos, repo, {
+      mode: body?.mode || undefined,
+      name: body?.name || undefined,
+      agent: body?.agent || undefined,
+      allowUsers: Array.isArray(body?.allowUsers) ? body.allowUsers.map(String) : undefined,
+    });
+    app.updateConfig({ repos: added.repos });
+    return added.repo;
   } catch (e) {
     throw new HttpError(400, (e as Error).message);
   }

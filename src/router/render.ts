@@ -46,7 +46,9 @@ export function renderTrigger(app: App, t: TriggerRow): string {
     const head = `${ref.T(t.id)} REPORT · ${ref.W(w?.id)} (${agentLabel(w?.agent ?? '')}) "${snippet(w?.title, 70)}" · status=${meta.status ?? '?'}${
       w?.silent ? ' · SILENT task' : ''
     } · reply thread ${ref.TH(replyTh?.id ?? app.store.localThread().id)}`;
-    const extra = [meta.pr_url ? `PR: ${meta.pr_url}` : '', meta.question && !t.text.includes(meta.question) ? `question: ${snippet(meta.question, 400)}` : '', meta.error ? `error: ${snippet(meta.error, 300)}` : '']
+    const pr = meta.pr_url || w?.pr_url; // a follow-up run reports no new PR, but the old one is still the PR
+    const where = !pr && w?.cwd ? (w.branch ? `branch ${w.branch}${w.repo ? ` in ${w.repo}` : ''} (no PR; \`superagent diff ${ref.W(w.id)}\`)` : `files in ${w.cwd}`) : '';
+    const extra = [pr ? `PR: ${pr}` : where, meta.question && !t.text.includes(meta.question) ? `question: ${snippet(meta.question, 400)}` : '', meta.error ? `error: ${snippet(meta.error, 300)}` : '']
       .filter(Boolean)
       .join(' · ');
     return `${head}\n  "${snippet(t.text, INLINE_EXPLICIT, `recall ${ref.W(w?.id)}`)}"${extra ? `\n  ${extra}` : ''}`;

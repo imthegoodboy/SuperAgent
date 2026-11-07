@@ -5,7 +5,7 @@ import { parseArgs } from 'node:util';
 import { AGENT_IDS, applyConfigPatch, loadConfig, publicConfig, saveConfig, type SourceMode } from '../core/config.js';
 import { CLI_PATH, ensureDirs, paths, pkgVersion } from '../core/paths.js';
 import { ago, duration, sleep } from '../core/util.js';
-import { isAlive, killTree, run } from '../agents/process.js';
+import { isAlive, killTree, resolveCommand, run, runInteractive } from '../agents/process.js';
 import { detectAgents } from '../agents/runner.js';
 import {
   autostartStatus,
@@ -14,11 +14,13 @@ import {
   ensureIntegrations,
   installIntegrations,
   integrationStatus,
+  addRepo,
+  repoForFolder,
   resolveRepoInput,
   uninstallIntegrations,
 } from '../daemon/system.js';
 import { STOP_FLAG, watchdogPid } from '../daemon/watchdog.js';
-import { api, baseUrl, events, health } from './client.js';
+import { api, baseUrl, events, health, sessionId, token } from './client.js';
 
 // The `superagent` CLI is used by coding agents (Claude Code, Codex, OpenCode, Cursor) that load the
 // superagent skill and act as SuperAgent's router. Output is plain text for the agent to read, or
@@ -106,12 +108,13 @@ that runs Claude Code, Codex, OpenCode and Cursor workers in parallel, each in i
 These commands are for coding agents. The ${bold('superagent')} skill explains how to use them.
 
 ${bold('Be the router')}
+  claude [request]            Open Claude Code in this terminal as the router (no editing tools)
   router attach [--take]      Become the router: context, memory, and what happened while you were away
   router detach               Hand the router role back to the background router
   router status               Who is the router right now, and its recent turns
   events [--wait <seconds>]   New events that need a decision (waits up to 280 s for one with --wait)
   dispatch <task|->           Start a worker and return at once
-                                --agent claude|codex|opencode|cursor  --repo <name>  --title <text>
+                                --agent claude|codex|opencode|cursor  --repo <name|owner/repo|.>  --title <text>
                                 --follow TH#8,TH#9  --reply TH#8  --silent
   tell <W#3> <text|->         New instructions or information for a worker (it resumes with its memory)
   cancel <W#3> [--reason r]   Stop a worker
@@ -124,6 +127,7 @@ ${bold('Be the router')}
 ${bold('Workers')}
   workers [--all]             List workers (alias: ls)
   logs <W#3> [-f]             What a worker did; -f follows live. Without an id: the service log
+  diff <W#3> [--patch]        What a worker changed: commits, files, uncommitted work
   retry <W#3>                 Run a failed or stopped worker again
   archive <W#3>               Remove a finished worker's workspace (its branch and PR stay)
   graph [--mermaid]           Router → workers → threads they follow
@@ -187,8 +191,15 @@ function serviceEnv(): NodeJS.ProcessEnv {
 }
 
 /** Commands that need the service start it on demand, so an agent never has to. */
+let checkedVersion = false;
 async function ensureRunning(): Promise<void> {
-  if (!(await health())) await start(false, true);
+  const h = await health();
+  if (!h) return start(false, true);
+  // After `npm i -g` the old service keeps running until restarted.
+  if (!checkedVersion && h.version !== pkgVersion()) {
+    console.error(yellow(`SuperAgent ${h.version} is running, but ${pkgVersion()} is installed. Run \`superagent restart\` to switch (workers resume).`));
+  }
+  checkedVersion = true;
 }
 
 async function stop(quiet = false): Promise<void> {
@@ -220,7 +231,8 @@ async function status(): Promise<void> {
     console.log(`  ${dim('Router ')}  ${who}${r.pending ? ` · ${yellow(`${r.pending} events waiting`)}` : ''}${r.lastError && !r.attached ? red(` · last error: ${String(r.lastError).slice(0, 80)}`) : ''}`);
     const parts = ['running', 'queued', 'waiting', 'done', 'failed'].filter((k) => c[k]).map((k) => STATUS_COLOR[k](`${c[k]} ${k}`));
     console.log(`  ${dim('Workers')}  ${parts.join(' · ') || 'none yet'} ${dim(`(max ${s.workers.max} in parallel)`)}`);
-    console.log(`  ${dim('Agents ')}  ${s.agents.map((a: any) => (a.installed ? `${green('✓')} ${a.id}` : `${red('✗')} ${dim(a.id)}`)).join('  ')}`);
+    const agentList = s.agents.map((a: any) => (a.installed ? `${green('✓')} ${a.id}` : `${red('✗')} ${dim(a.id)}`)).join('  ');
+    console.log(`  ${dim('Agents ')}  ${agentList || dim('detecting…')}`);
     const gh = s.github;
     console.log(
       `  ${dim('Inputs ')}  GitHub ${gh.enabled ? `${gh.repos} repo${gh.repos === 1 ? '' : 's'}${gh.login ? ` as @${gh.login}` : ''}` : 'off'}${
@@ -233,7 +245,7 @@ async function status(): Promise<void> {
 // ---------- the router: an attached agent session ----------
 
 /** Workers see the skill too. They may look around, but only the router changes anything. */
-const WORKER_COMMANDS = new Set(['status', 'workers', 'ls', 'logs', 'recall', 'graph', 'memory', 'activity', 'agents', 'doctor']);
+const WORKER_COMMANDS = new Set(['status', 'workers', 'ls', 'logs', 'diff', 'recall', 'graph', 'memory', 'activity', 'agents', 'doctor', 'hook']);
 
 function refuseInWorker(cmd: string | undefined, sub: string | undefined): void {
   const w = process.env.SUPERAGENT_WORKER;
@@ -241,6 +253,32 @@ function refuseInWorker(cmd: string | undefined, sub: string | undefined): void 
   const readOnly =
     cmd === undefined || WORKER_COMMANDS.has(cmd) || (cmd === 'config' && (!sub || sub === 'get')) || ((cmd === 'repo' || cmd === 'repos') && (!sub || sub === 'list'));
   if (!readOnly) die(`You are SuperAgent worker ${w}; \`superagent ${cmd}\` is for the router. Finish your own task and end with your report.`);
+}
+
+/**
+ * `--repo` takes a configured name, an owner/repo slug, or a folder ("." for the project the agent is
+ * in). A folder that isn't configured yet is added on the spot, so working "here" takes one command.
+ */
+async function repoArg(value: string | undefined): Promise<string | undefined> {
+  if (!value) return undefined;
+  await ensureRunning();
+  const cfg = await api<{ repos: { name: string; slug?: string; path?: string }[] }>('GET', '/api/config');
+  const v = value.toLowerCase();
+  if (cfg.repos.some((r) => r.name.toLowerCase() === v || r.slug?.toLowerCase() === v)) return value;
+  const dir = path.resolve(value);
+  const isFolder = fs.existsSync(dir) && fs.statSync(dir).isDirectory();
+  if (!isFolder && /^[\w.-]+\/[\w.-]+$/.test(value)) {
+    // A GitHub repo that isn't configured yet: add it (it is cloned when the worker starts).
+    const added = await api('POST', '/api/repos', { input: value });
+    console.error(dim(`Added repository ${added.name} (${added.slug}).`));
+    return added.name;
+  }
+  if (!isFolder) return value; // the router reports it as unknown
+  const known = await repoForFolder(cfg.repos as never, dir);
+  if (known) return known.name;
+  const added = await api('POST', '/api/repos', { input: dir });
+  console.error(dim(`Added repository ${added.name}${added.slug ? ` (${added.slug})` : ''} at ${added.path}.`));
+  return added.name;
 }
 
 async function act(action: Record<string, unknown>, print: (r: any) => void): Promise<void> {
@@ -310,6 +348,7 @@ async function workers(all: boolean): Promise<void> {
         `${bold(fit('W#' + w.id, 6))} ${st} ${dim(fit(w.agent, 9))} ${fit(w.title, 44)} ${dim(fit(w.repo ?? '-', 14))} ${dim(fit(ago(w.created_at), 8))}${w.pr_url ? ' ' + blue(w.pr_url) : ''}`,
       );
       if (w.status === 'waiting' && w.summary) console.log(yellow(`        ${String(w.summary).split('\n').pop()}`));
+      else if (w.status === 'running' && w.last) console.log(dim(`        ▸ ${fit(w.last, 100).trimEnd()}`));
     }
   });
 }
@@ -356,6 +395,59 @@ async function logs(idArg: string | undefined, follow: boolean): Promise<void> {
   await new Promise(() => {});
 }
 
+/** `superagent diff W#3 [--patch]`: what a worker changed, so the router can tell the user without reading files. */
+async function diff(idArg: string | undefined, patch: boolean): Promise<void> {
+  await ensureRunning();
+  const id = workerRef(idArg);
+  const { worker: w } = await api('GET', `/api/workers/${id.slice(2)}`);
+  if (!w.cwd || !fs.existsSync(w.cwd)) die(`${id}'s workspace is gone (archived).${w.pr_url ? ` Its PR: ${w.pr_url}` : ''}`);
+  if (!w.branch) {
+    // A scratch folder: list what is in it.
+    const files: string[] = [];
+    const walk = (dir: string, rel = '') => {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (files.length >= 200 || e.name === 'node_modules' || e.name === '.git') continue;
+        if (e.isDirectory()) walk(path.join(dir, e.name), path.join(rel, e.name));
+        else files.push(path.join(rel, e.name));
+      }
+    };
+    walk(w.cwd);
+    return out({ worker: id, folder: w.cwd, files }, () => {
+      console.log(`${bold(id)} works in a scratch folder: ${w.cwd}`);
+      for (const f of files) console.log(`  ${f}`);
+    });
+  }
+  let cut = false;
+  const git = async (...a: string[]) => {
+    const r = await run('git', ['-C', w.cwd, ...a], { timeoutMs: 60_000 });
+    if (r.code !== 0) throw new Error(`git ${a[0]} failed in ${w.cwd}: ${(r.stderr || r.stdout).trim().slice(0, 300)}`);
+    if (r.stdout.length >= 256 * 1024 - 1) cut = true; // run() keeps the last 256 KB
+    return r.stdout.trimEnd();
+  };
+  const range = `${w.base}...HEAD`;
+  const [commits, stat, status] = await Promise.all([git('log', '--oneline', `${w.base}..HEAD`), git('diff', '--stat', range), git('status', '--short')]);
+  let text = '';
+  if (patch) {
+    const parts = [await git('diff', range), await git('diff', 'HEAD')]; // committed, then staged + unstaged
+    // New files git doesn't track yet: show small ones in full.
+    for (const f of (await git('ls-files', '--others', '--exclude-standard')).split('\n').filter(Boolean)) {
+      const file = path.join(w.cwd, f);
+      const size = fs.statSync(file).size;
+      parts.push(size <= 64 * 1024 ? `--- new file: ${f}\n${fs.readFileSync(file, 'utf8')}` : `--- new file: ${f} (${size} bytes, not shown)`);
+    }
+    text = parts.filter(Boolean).join('\n');
+    if (cut) text = `(This patch is longer than 256 KB and its start is cut off; open ${w.cwd} to see all of it.)\n${text}`;
+  }
+  out({ worker: id, branch: w.branch, base: w.base, folder: w.cwd, pr: w.pr_url, commits: commits.split('\n').filter(Boolean), stat, uncommitted: status, patch: patch ? text : undefined }, () => {
+    console.log(`${bold(id)} on ${cyan(w.branch)} (from ${w.base})${w.pr_url ? ` · PR ${blue(w.pr_url)}` : ''}`);
+    console.log(dim(`  ${w.cwd}`));
+    console.log(commits ? `\nCommits:\n${commits.replace(/^/gm, '  ')}` : '\nNo commits yet.');
+    if (stat) console.log(`\n${stat}`);
+    if (status) console.log(`\nNot committed:\n${status.replace(/^/gm, '  ')}`);
+    if (patch && text) console.log(`\n${text}`);
+  });
+}
+
 async function graph(v: Record<string, any>): Promise<void> {
   await ensureRunning();
   const g = await api('GET', '/api/graph');
@@ -400,9 +492,10 @@ async function repo(sub: string | undefined, rest: string[], v: Record<string, a
       : await (async () => {
           const repoCfg = await resolveRepoInput(input, { mode: v.mode as SourceMode, name: v.name, agent: v.agent, allowUsers });
           const cfg = loadConfig();
-          cfg.repos = [...cfg.repos.filter((x) => x.name.toLowerCase() !== repoCfg.name.toLowerCase()), repoCfg];
+          const added = addRepo(cfg.repos, repoCfg, { mode: v.mode, name: v.name, agent: v.agent, allowUsers });
+          cfg.repos = added.repos;
           saveConfig(cfg);
-          return repoCfg;
+          return added.repo;
         })();
     return out(r, () => {
       console.log(`${green('✓')} Added ${bold(r.name)}${r.slug ? ` (${r.slug})` : ''}${r.path ? dim(' · ' + r.path) : ''}`);
@@ -538,6 +631,88 @@ async function doctor(): Promise<void> {
   if (asJson) console.log(JSON.stringify({ ok: !checks.some((c) => c.level === 'bad'), checks, skill }, null, 2));
 }
 
+/** The router's role, given to Claude Code by `superagent claude`. One line: it travels as an argument. */
+const ROUTER_ROLE =
+  'You are running as the router of SuperAgent. Use the superagent skill. You talk to the user and hand every piece of real work to workers with the superagent CLI; never edit files or run project commands yourself. Only superagent commands are pre-approved here.';
+
+/** Arguments for an interactive Claude Code session that is the router (exported for tests). */
+export function claudeRouterArgs(request: string): string[] {
+  const first = request
+    ? `Attach as SuperAgent's router, then handle this: ${request}`
+    : "Attach as SuperAgent's router and give me a short status: what is running, what needs me, and what happened while I was away.";
+  return [
+    // Only the shell (for the superagent CLI) and skills: no editing tools, so it can't drift into
+    // doing the work itself. That was the main failure of single sessions in the article's experiment.
+    // Deny rules win over allow rules in the user's own settings, and no MCP server can add tools back.
+    '--tools', 'Bash,Skill',
+    '--disallowedTools', 'Edit', 'Write', 'NotebookEdit',
+    '--strict-mcp-config',
+    '--allowedTools', 'Bash(superagent *)', 'Bash(superagent)',
+    '--append-system-prompt', ROUTER_ROLE,
+    first,
+  ];
+}
+
+/** `superagent claude [request]`: open Claude Code in this terminal, already acting as the router. */
+async function launchClaude(request: string): Promise<void> {
+  const resolved = resolveCommand('claude');
+  if (!resolved) die('Claude Code is not installed (`claude` was not found on PATH).');
+  // A wrapper we can't see through would run the request through cmd.exe or PowerShell, which rewrite
+  // characters such as % and $ in it.
+  if (resolved.via === 'cmd' || resolved.via === 'powershell') die(`Can't start Claude Code safely through ${resolved.path}; run \`claude\` yourself and say "use superagent".`);
+  await ensureRunning();
+  const code = await runInteractive(resolved, claudeRouterArgs(request), process.cwd());
+  if (code) process.exitCode = code;
+}
+
+/**
+ * `superagent hook prompt`: the skill registers this as a Claude Code UserPromptSubmit hook, so it runs
+ * on every user message once the session has used the skill. When this session is the router and
+ * events are waiting, it prints a short notice that becomes part of the model's context: results show
+ * up without asking (the article's full-duplex delivery). It hands nothing out, never starts the
+ * service, and never fails or slows the agent down.
+ */
+async function hook(): Promise<void> {
+  let input: { session_id?: string } = {};
+  if (!process.stdin.isTTY) {
+    process.stdin.setEncoding('utf8');
+    let raw = '';
+    const read = (async () => {
+      for await (const chunk of process.stdin) raw += chunk;
+    })();
+    await Promise.race([read, sleep(1000)]);
+    try {
+      input = JSON.parse(raw || '{}');
+    } catch {
+      /* not JSON: use the environment */
+    }
+  }
+  // SUPERAGENT_SESSION, when set, is also what the router commands send (see sessionId()).
+  const session = String(process.env.SUPERAGENT_SESSION || input.session_id || sessionId());
+  let r: { attached: boolean; pending: string[]; away_pending: boolean } = { attached: false, pending: [], away_pending: false };
+  if (session) {
+    try {
+      const res = await fetch(`${baseUrl()}/api/router/peek`, {
+        headers: { authorization: `Bearer ${token()}`, 'x-superagent-session': session },
+        signal: AbortSignal.timeout(1500),
+      });
+      if (res.ok) r = (await res.json()) as typeof r;
+    } catch {
+      /* service not running or slow: say nothing */
+    }
+  }
+  const n = r.pending.length;
+  let notice: string | null = null;
+  if (r.attached && (n || r.away_pending)) {
+    const head = n ? `${n} event${n === 1 ? ' is' : 's are'} waiting` : 'things happened while no agent was the router';
+    const lines = [`[SuperAgent] You are the router and ${head}. Run \`superagent events\` and handle ${n === 1 ? 'it' : 'them'} along with this message.`];
+    for (const p of r.pending.slice(0, 8)) lines.push(`- ${p}`);
+    if (n > 8) lines.push(`- … and ${n - 8} more`);
+    notice = lines.join('\n');
+  }
+  out({ notice, pending: r.pending, away_pending: r.away_pending }, () => notice && console.log(notice));
+}
+
 async function uninstall(): Promise<void> {
   await stop(true);
   const removed = uninstallIntegrations();
@@ -575,6 +750,7 @@ export async function main(argv: string[]): Promise<void> {
       wait: { type: 'string' },
       take: { type: 'boolean' },
       mermaid: { type: 'boolean' },
+      patch: { type: 'boolean' },
       mode: { type: 'string' },
       name: { type: 'string' },
       allow: { type: 'string' },
@@ -592,7 +768,7 @@ export async function main(argv: string[]): Promise<void> {
   if (v.help || cmd === 'help') return out({ help: HELP.replace(/\x1b\[\d+m/g, '') }, () => console.log(HELP));
   // Installing the package is the only step a person takes; every command keeps the skill in place
   // for agents installed later. It must never get in the way of the command itself.
-  if (cmd !== '__daemon' && cmd !== '__watchdog' && cmd !== 'uninstall') {
+  if (cmd !== '__daemon' && cmd !== '__watchdog' && cmd !== 'uninstall' && cmd !== 'hook') {
     try {
       ensureIntegrations();
     } catch {
@@ -642,7 +818,7 @@ export async function main(argv: string[]): Promise<void> {
             task,
             title: v.title,
             agent: v.agent,
-            repo: v.repo,
+            repo: await repoArg(v.repo as string | undefined),
             threads: list(v.follow).map(threadRef),
             reply_thread: v.reply ? threadRef(String(v.reply)) : undefined,
             silent: !!v.silent,
@@ -717,6 +893,8 @@ export async function main(argv: string[]): Promise<void> {
       }
       case 'graph':
         return graph(v);
+      case 'diff':
+        return diff(rest[0], !!v.patch);
       case 'activity':
         return activity();
 
@@ -748,6 +926,11 @@ export async function main(argv: string[]): Promise<void> {
       }
       case 'doctor':
         return doctor();
+      case 'claude':
+        return launchClaude(rest.join(' ').trim());
+      case 'hook':
+        if (rest[0] !== 'prompt') die('Usage: superagent hook prompt   (run by an agent harness on each user message)');
+        return hook();
       default:
         if (!asJson) console.log(HELP);
         die(`Unknown command "${cmd}"`);

@@ -311,6 +311,54 @@ test('the CLI drives the router: attach, dispatch, events, graph, recall', async
   assert.match(bad.stderr, /not available/);
 });
 
+test('`--repo .` adds the project on first use, and `diff` shows what the worker changed', async () => {
+  const dir = path.join(home, 'here-repo');
+  fs.mkdirSync(dir);
+  const git = (...a) => execFileSync('git', ['-C', dir, ...a], { stdio: 'pipe' }).toString();
+  git('init', '-b', 'main');
+  git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '--allow-empty', '-m', 'init');
+  const here = (task) => spawnSync(process.execPath, [cli, 'dispatch', task, '--repo', '.', '--json'], { env, cwd: dir, encoding: 'utf8' });
+  const first = here('touch a file here');
+  assert.equal(first.status, 0, first.stdout + first.stderr);
+  assert.match(first.stderr, /Added repository here-repo/);
+  const started = JSON.parse(first.stdout);
+  assert.equal(started.repo, 'here-repo');
+  const second = here('another job here');
+  assert.equal(JSON.parse(second.stdout).repo, 'here-repo');
+  assert.doesNotMatch(second.stderr, /Added repository/, 'added once');
+  assert.equal((await call('GET', '/api/config')).repos.filter((r) => r.name.startsWith('here-repo')).length, 1);
+
+  await until(async () => (await worker(started.worker)).status === 'done');
+  const d = sa(['diff', started.worker]);
+  assert.equal(d.status, 0, d.stderr);
+  assert.match(d.stdout, /on superagent\/w\d+-touch-a-file-here \(from main\)/);
+  assert.match(d.stdout, /Not committed:[\s\S]*mock-output\.txt/);
+  const patch = sa(['diff', started.worker, '--patch']);
+  assert.ok(patch.stdout.includes('--- new file: mock-output.txt\nmock agent was here'), 'new files are part of the patch');
+  const ev = JSON.parse(sa(['events', '--json']).stdout);
+  const n = started.worker.slice(2);
+  assert.ok(ev.text.includes(`branch superagent/w${n}-touch-a-file-here in here-repo (no PR; \`superagent diff ${started.worker}\`)`), ev.text);
+});
+
+test('the Claude Code hook tells the router session what is waiting, and nobody else', async () => {
+  await call('POST', '/api/router/attach', { take: true }, 'hook-session');
+  await call('GET', '/api/router/events', undefined, 'hook-session');
+  const d = await act({ type: 'dispatch', task: 'hook job', title: 'Hook job' }, 'hook-session');
+  await until(async () => (await worker(d.worker)).status === 'done');
+  const hook = (session) => spawnSync(process.execPath, [cli, 'hook', 'prompt'], { env: { ...env, SUPERAGENT_SESSION: '' }, input: JSON.stringify({ session_id: session, prompt: 'hi' }), encoding: 'utf8' });
+  const mine = hook('hook-session');
+  assert.equal(mine.status, 0, mine.stderr);
+  assert.match(mine.stdout, /^\[SuperAgent\] You are the router and 1 event is waiting/);
+  assert.ok(mine.stdout.includes(`REPORT · ${d.worker} (Mock Agent) "Hook job"`), mine.stdout);
+  assert.equal(hook('another-session').stdout, '', 'other sessions hear nothing');
+  const asJson = spawnSync(process.execPath, [cli, 'hook', 'prompt', '--json'], { env: { ...env, SUPERAGENT_SESSION: '' }, input: JSON.stringify({ session_id: 'another-session' }), encoding: 'utf8' });
+  assert.deepEqual(JSON.parse(asJson.stdout).notice, null, '--json always prints JSON');
+  const ev = await call('GET', '/api/router/events', undefined, 'hook-session');
+  assert.ok(ev.events.some((e) => e.worker === d.worker), 'the hook only peeks; events still hands it out');
+  assert.equal(hook('hook-session').stdout, '', 'nothing left to tell');
+  await call('POST', '/api/router/detach', {}, 'hook-session');
+});
+
 test('workers cannot use router commands', () => {
   const r = sa(['dispatch', 'spawn another worker'], { SUPERAGENT_WORKER: 'W#1' });
   assert.equal(r.status, 1);
@@ -318,4 +366,28 @@ test('workers cannot use router commands', () => {
   assert.equal(sa(['stop'], { SUPERAGENT_WORKER: 'W#1' }).status, 1, 'a worker cannot stop the service');
   assert.equal(sa(['config', 'set', 'workers.maxConcurrent', '9'], { SUPERAGENT_WORKER: 'W#1' }).status, 1);
   assert.equal(sa(['workers'], { SUPERAGENT_WORKER: 'W#1' }).status, 0, 'read-only commands still work');
+});
+
+test('`superagent claude` opens Claude Code as the router, with no editing tools', () => {
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'superagent-fake-claude-'));
+  const script = 'console.log(JSON.stringify(process.argv.slice(2)));\n';
+  if (process.platform === 'win32') {
+    // What npm writes for a global CLI: SuperAgent unwraps it and runs the script with node directly.
+    fs.writeFileSync(path.join(bin, 'fake-claude.js'), script);
+    fs.writeFileSync(path.join(bin, 'claude.cmd'), '@"%dp0%\\fake-claude.js" %*\r\n');
+  } else {
+    fs.writeFileSync(path.join(bin, 'claude'), `#!/usr/bin/env node\n${script}`, { mode: 0o755 });
+  }
+  const p = `${bin}${path.delimiter}${process.env.PATH ?? process.env.Path}`;
+  const r = sa(['claude', 'fix', 'the', 'login', 'bug'], { PATH: p, Path: p });
+  fs.rmSync(bin, { recursive: true, force: true });
+  assert.equal(r.status, 0, r.stderr);
+  const args = JSON.parse(r.stdout.trim().split('\n').pop());
+  assert.deepEqual(args.slice(0, 2), ['--tools', 'Bash,Skill'], 'only the shell and skills');
+  assert.deepEqual(args.slice(2, 6), ['--disallowedTools', 'Edit', 'Write', 'NotebookEdit'], 'editing denied even if settings allow it');
+  assert.ok(args.includes('--strict-mcp-config'), 'no MCP server can add tools back');
+  const allow = args.indexOf('--allowedTools');
+  assert.deepEqual(args.slice(allow + 1, allow + 3), ['Bash(superagent *)', 'Bash(superagent)']);
+  assert.match(args[args.indexOf('--append-system-prompt') + 1], /router of SuperAgent/);
+  assert.match(args.at(-1), /then handle this: fix the login bug$/);
 });
