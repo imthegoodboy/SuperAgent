@@ -92,6 +92,7 @@ async function textArg(parts: string[], usage: string): Promise<string> {
   let text = parts.join(' ').trim();
   if (text === '-') {
     text = '';
+    process.stdin.setEncoding('utf8'); // decode across chunk boundaries (…, →, CJK)
     for await (const chunk of process.stdin) text += chunk;
     text = text.trim();
   }
@@ -150,14 +151,18 @@ async function start(foreground: boolean, quiet = false): Promise<void> {
     return;
   }
   if (foreground) {
-    const { runDaemon } = await import('../daemon/main.js');
-    await runDaemon();
+    try {
+      await (await import('../daemon/main.js')).runDaemon();
+    } catch (e) {
+      console.error('daemon failed:', e);
+      process.exit(1);
+    }
     return;
   }
   ensureDirs();
   fs.rmSync(STOP_FLAG, { force: true });
   if (quiet) say(dim('Starting SuperAgent…'));
-  const child = spawn(process.execPath, [CLI_PATH, '__watchdog'], { detached: true, stdio: 'ignore', windowsHide: true, cwd: paths.home });
+  const child = spawn(process.execPath, [CLI_PATH, '__watchdog'], { detached: true, stdio: 'ignore', windowsHide: true, cwd: paths.home, env: serviceEnv() });
   child.unref();
   for (let i = 0; i < 60; i++) {
     await sleep(500);
@@ -169,6 +174,16 @@ async function start(foreground: boolean, quiet = false): Promise<void> {
     }
   }
   die(`SuperAgent did not start. See ${path.join(paths.logs, 'daemon.log')}`);
+}
+
+/**
+ * Router commands start the service from inside an agent's shell. The long-lived service and its
+ * workers must not inherit that one session's identity or sandbox, so those variables are dropped.
+ */
+const SESSION_VARS = /^(CLAUDECODE|CLAUDE_PID|CLAUDE_EFFORT|CLAUDE_CODE_(SESSION_ID|CHILD_SESSION|SESSION_ATTENDED|MESSAGING_SOCKET|MESSAGING_TOKEN|ENTRYPOINT|SSE_PORT)|CODEX_SANDBOX\w*|CODEX_THREAD_ID|SUPERAGENT_SESSION|SUPERAGENT_WORKER)$/;
+
+function serviceEnv(): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(process.env).filter(([k]) => !SESSION_VARS.test(k)));
 }
 
 /** Commands that need the service start it on demand, so an agent never has to. */
@@ -217,22 +232,29 @@ async function status(): Promise<void> {
 
 // ---------- the router: an attached agent session ----------
 
-/** The router commands change shared state, so workers (which also see the skill) may not use them. */
-function refuseInWorker(cmd: string): void {
+/** Workers see the skill too. They may look around, but only the router changes anything. */
+const WORKER_COMMANDS = new Set(['status', 'workers', 'ls', 'logs', 'recall', 'graph', 'memory', 'activity', 'agents', 'doctor']);
+
+function refuseInWorker(cmd: string | undefined, sub: string | undefined): void {
   const w = process.env.SUPERAGENT_WORKER;
-  if (w) die(`You are SuperAgent worker ${w}; \`superagent ${cmd}\` is for the router. Finish your own task and end with your report.`);
+  if (!w) return;
+  const readOnly =
+    cmd === undefined || WORKER_COMMANDS.has(cmd) || (cmd === 'config' && (!sub || sub === 'get')) || ((cmd === 'repo' || cmd === 'repos') && (!sub || sub === 'list'));
+  if (!readOnly) die(`You are SuperAgent worker ${w}; \`superagent ${cmd}\` is for the router. Finish your own task and end with your report.`);
 }
 
 async function act(action: Record<string, unknown>, print: (r: any) => void): Promise<void> {
   await ensureRunning();
-  const [r] = await api<any[]>('POST', '/api/router/actions', { actions: [action] });
+  const { results, away_pending } = await api<{ results: any[]; away_pending: boolean }>('POST', '/api/router/actions', { actions: [action] });
+  const r = results[0];
   if (asJson) {
-    console.log(JSON.stringify(r, null, 2));
+    console.log(JSON.stringify({ ...r, away_pending }, null, 2));
     if (!r.ok) process.exitCode = 1;
     return;
   }
   if (!r.ok) die(r.error);
   print(r);
+  if (away_pending) console.log(yellow('  Things happened while no agent was the router: run `superagent events` to see them.'));
 }
 
 async function router(sub: string | undefined, v: Record<string, any>): Promise<void> {
@@ -537,8 +559,6 @@ async function uninstall(): Promise<void> {
 
 // ---------- entry ----------
 
-const ROUTER_COMMANDS = new Set(['router', 'events', 'dispatch', 'tell', 'cancel', 'reply', 'ignore', 'follow', 'unfollow', 'remember', 'forget', 'retry', 'archive']);
-
 export async function main(argv: string[]): Promise<void> {
   const { values: v, positionals } = parseArgs({
     args: argv,
@@ -582,20 +602,23 @@ export async function main(argv: string[]): Promise<void> {
 
   // The cases `return someCommand()`; awaiting the whole switch makes their rejections reach the catch.
   const dispatch = async (): Promise<void> => {
-    if (cmd && ROUTER_COMMANDS.has(cmd)) refuseInWorker(cmd);
+    refuseInWorker(cmd, rest[0]);
     switch (cmd) {
       case undefined:
         await status();
         if (!asJson) console.log(`\n${dim('Run `superagent help` for all commands.')}`);
         return;
-      case '__daemon': {
-        const { runDaemon } = await import('../daemon/main.js');
-        return runDaemon();
-      }
-      case '__watchdog': {
-        const { runWatchdog } = await import('../daemon/watchdog.js');
-        return runWatchdog();
-      }
+      case '__daemon':
+      case '__watchdog':
+        try {
+          if (cmd === '__daemon') await (await import('../daemon/main.js')).runDaemon();
+          else await (await import('../daemon/watchdog.js')).runWatchdog();
+        } catch (e) {
+          // Half-started (say, the server listens but init failed): exit so the watchdog restarts it.
+          console.error(`${cmd.slice(2)} failed:`, e);
+          process.exit(1);
+        }
+        return;
       case 'start':
         return start(!!v.foreground);
       case 'stop':

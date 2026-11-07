@@ -89,7 +89,12 @@ export interface Lease {
   since: number;
   renewedAt: number;
   expiresAt: number;
+  /** The holding session's identity, when its harness exposes one. */
+  owner: string | null;
 }
+
+/** A router command from a session that does not hold the lease. */
+export class LeaseConflict extends Error {}
 
 /** What an action did, returned to an attached agent (the background router ignores it). */
 export type ActionResult = { type: string; ok: boolean; error?: string } & Record<string, unknown>;
@@ -172,37 +177,64 @@ export class Router {
   }
 
   // ---------- attached agent (the CLI router) ----------
+  //
+  // One router at a time (Section 2.1). An agent session holds a lease that its router commands renew.
+  // `owner` is the session's identity when its harness exposes one (Claude Code does), so a session
+  // that was replaced gets told so instead of quietly splitting the events with its successor.
 
   /** The current lease, if an agent session is the router right now. */
   lease(): Lease | null {
-    const raw = tryJson<{ since: number; renewedAt: number }>(this.app.store.getKv('router.lease') ?? '');
+    const raw = tryJson<{ since: number; renewedAt: number; owner?: string | null }>(this.app.store.getKv('router.lease') ?? '');
     if (!raw?.renewedAt) return null;
     const expiresAt = raw.renewedAt + this.app.config.router.leaseMinutes * 60_000;
-    if (Date.now() < expiresAt) return { since: raw.since, renewedAt: raw.renewedAt, expiresAt };
+    if (Date.now() < expiresAt) return { since: raw.since, renewedAt: raw.renewedAt, expiresAt, owner: raw.owner ?? null };
     this.expire();
     return null;
   }
 
-  /** The lease ran out without a detach (the session probably ended): the background router takes over. */
-  private expire(): void {
-    this.app.store.setKv('router.lease', null);
-    log('router: the attached agent went quiet; the background router takes over');
-    this.requeueUnhandled();
+  /** The lease ended (it ran out, or the session detached): the background router takes over. */
+  private endLease(): void {
+    const { store } = this.app;
+    store.setKv('router.lease', null);
+    // Everything from now on is news for the next session that attaches.
+    if (!store.getKv('router.awaySince')) store.setKv('router.awaySince', String(Date.now()));
+    if (this.leaseTimer) clearTimeout(this.leaseTimer);
+    this.leaseTimer = null;
     this.emitStatus();
     setImmediate(() => this.kick());
   }
 
-  /** Keep (or take) the router role for the attached agent. Returns true if it was not attached before. */
-  private renew(): boolean {
+  /** The lease ran out without a detach: the session probably ended. */
+  private expire(): void {
+    log('router: the attached agent went quiet; the background router takes over');
+    this.requeueUnhandled();
+    this.endLease();
+  }
+
+  private conflict(cur: Lease): LeaseConflict {
+    return new LeaseConflict(
+      `Another agent session is the router (attached ${ago(cur.since)}, last command ${ago(cur.renewedAt)}). ` +
+        'Take over with `superagent router attach --take` only if that session has ended or the user says so.',
+    );
+  }
+
+  /** Refuse a session that is not the one holding the lease. */
+  private checkOwner(owner: string | null): void {
+    const cur = this.lease();
+    if (cur && cur.owner !== owner) throw this.conflict(cur);
+  }
+
+  /** Keep (or take) the router role for this session. */
+  private renew(owner: string | null): void {
     const cur = this.lease();
     const now = Date.now();
-    this.app.store.setKv('router.lease', JSON.stringify({ since: cur?.since ?? now, renewedAt: now }));
+    const since = cur && cur.owner === owner ? cur.since : now;
+    this.app.store.setKv('router.lease', JSON.stringify({ since, renewedAt: now, owner }));
     this.armLeaseTimer(now + this.app.config.router.leaseMinutes * 60_000);
     if (!cur) {
       log('router: an agent session attached as the router');
       this.emitStatus();
     }
-    return !cur;
   }
 
   /** When the lease runs out, the background router takes over again (also after a daemon restart). */
@@ -216,38 +248,43 @@ export class Router {
     this.leaseTimer.unref();
   }
 
-  /** An agent session becomes the router. Refused while another session holds it, unless `take`. */
-  async attach(take = false): Promise<{ text: string; lease: Lease }> {
+  /** What happened since the last lease ended, once; null when there is nothing to tell. */
+  private takeAway(): string | null {
+    const since = Number(this.app.store.getKv('router.awaySince') ?? 0);
+    if (!since) return null;
+    this.app.store.setKv('router.awaySince', null);
+    return renderAway(this.app, since) || null;
+  }
+
+  /**
+   * An agent session becomes the router. The same session may attach again at any time; another one
+   * is refused while the lease is held, unless `take`. Sessions without an identity can't be told
+   * apart, so they need `take` too.
+   */
+  async attach(take: boolean, owner: string | null): Promise<{ text: string; lease: Lease }> {
     const cur = this.lease();
-    if (cur && !take) {
-      throw new Error(
-        `Another agent session is already the router (attached ${ago(cur.since)}, last command ${ago(cur.renewedAt)}). ` +
-          'If that session is you, or it has ended, run `superagent router attach --take`.',
-      );
-    }
-    const seenAt = Number(this.app.store.getKv('router.ext.seenAt') ?? 0);
-    this.renew();
+    const sameSession = !!cur && owner !== null && cur.owner === owner;
+    if (cur && !take && !sameSession) throw this.conflict(cur);
+    if (cur && !sameSession) log('router: a new agent session took over as the router');
+    this.renew(owner);
     await this.app.agentsReady; // right after the service starts, agents are still being detected
     await this.whenIdle();
-    this.app.store.setKv('router.ext.seenAt', String(Date.now()));
-    return { text: renderAttach(this.app, seenAt || null), lease: this.lease()! };
+    return { text: renderAttach(this.app, this.takeAway()), lease: this.lease()! };
   }
 
   /** Hand the router role back to the background router. */
-  detach(): void {
-    this.app.store.setKv('router.lease', null);
-    if (this.leaseTimer) clearTimeout(this.leaseTimer);
-    this.leaseTimer = null;
+  detach(owner: string | null): void {
+    if (!this.lease()) return;
+    this.checkOwner(owner);
     log('router: the agent session detached; the background router takes over');
-    this.emitStatus();
-    this.kick();
+    this.endLease();
   }
 
   private whenIdle(): Promise<void> {
     return this.busy ? new Promise((r) => this.idleWaiters.push(r)) : Promise.resolve();
   }
 
-  /** Resolves on the next event that needs a router decision, a timeout, or an abort. */
+  /** Resolves on the next event that needs a router decision, a change of router, a timeout, or an abort. */
   private nextEvent(ms: number, signal?: AbortSignal): Promise<void> {
     return new Promise((resolve) => {
       const done = () => {
@@ -257,7 +294,7 @@ export class Router {
         resolve();
       };
       const onEvent = (ev: { type: string; data: any }) => {
-        if (ev.type === 'trigger' && ev.data?.status === 'pending') done();
+        if ((ev.type === 'trigger' && ev.data?.status === 'pending') || ev.type === 'router') done();
       };
       const timer = setTimeout(done, Math.max(0, ms));
       bus.on('event', onEvent);
@@ -269,16 +306,20 @@ export class Router {
    * The attached agent's inbox: every event that needs a router decision, batched (Section 2.1),
    * plus FYI lines for events already handled in code. With `waitMs`, waits for the next event.
    */
-  async events(waitMs = 0, signal?: AbortSignal): Promise<EventsResult> {
+  async events(waitMs: number, signal: AbortSignal | undefined, owner: string | null): Promise<EventsResult> {
     const { store } = this.app;
-    const seenAt = Number(store.getKv('router.ext.seenAt') ?? 0);
-    const acquired = this.renew();
+    const deadline = Date.now() + Math.max(0, waitMs); // time spent waiting below counts too
+    this.checkOwner(owner);
+    this.renew(owner);
     await this.whenIdle(); // a background turn that is already running finishes first
-    const away = acquired && seenAt ? renderAway(this.app, seenAt) : null;
-    const deadline = Date.now() + Math.max(0, waitMs);
+    const mine = this.lease()!.since;
+    const away = this.takeAway();
     for (;;) {
       // The agent stopped waiting (its command was killed): deliver nothing it would never see.
       if (signal?.aborted) throw new Error('the client went away');
+      // Detached or replaced while waiting: this session is no longer the router.
+      const now = this.lease();
+      if (!now || now.since !== mine || now.owner !== owner) throw new LeaseConflict('This session is no longer the router. Run `superagent router attach` to become it again.');
       const batch = store.pendingRouterTriggers(this.app.config.router.maxBatch);
       if (batch.length || away || this.notes.length || Date.now() >= deadline) {
         const fyi = store.unseenFyi();
@@ -295,7 +336,6 @@ export class Router {
           store.setKv('router.ext.batch', JSON.stringify(batch.map((t) => t.id)));
           emit('router_turn', store.get('SELECT * FROM router_turns WHERE id = ?', turnId));
         }
-        store.setKv('router.ext.seenAt', String(Date.now()));
         return {
           text,
           turn: turnId,
@@ -319,14 +359,17 @@ export class Router {
         };
       }
       await this.nextEvent(Math.min(deadline - Date.now(), 10_000), signal);
-      this.renew(); // still waiting, so still the router
+      if (signal?.aborted) throw new Error('the client went away');
+      await this.whenIdle();
+      if (this.lease()?.since === mine) this.renew(owner); // still waiting, so still the router
     }
   }
 
   /** Actions from the attached agent: the same action types the background router emits. */
-  async act(actions: Action[]): Promise<ActionResult[]> {
+  async act(actions: Action[], owner: string | null): Promise<{ results: ActionResult[]; away_pending: boolean }> {
     const { store } = this.app;
-    this.renew();
+    this.checkOwner(owner);
+    this.renew(owner);
     await this.app.agentsReady;
     await this.whenIdle(); // never act alongside a background turn that was already running
     const batch = (tryJson<number[]>(store.getKv('router.ext.batch') ?? '[]') ?? [])
@@ -353,22 +396,24 @@ export class Router {
     }
     store.updateTurn(turnId, { actions: JSON.stringify([...turnActions(turn?.actions ?? null), ...actions]) });
     emit('router_turn', store.get('SELECT * FROM router_turns WHERE id = ?', turnId));
-    // What this session did itself (replies, "Started W#n") is not news when it attaches again.
-    store.setKv('router.ext.seenAt', String(Date.now()));
-    return results;
+    // The "while you were away" summary waits for the next `events`; say that it is there.
+    return { results, away_pending: !!store.getKv('router.awaySince') };
   }
 
   /**
-   * The lease ran out without a detach: the session probably ended. If it never acted on the last
-   * batch it was given, the events from people (not worker reports, which stay visible on the workers)
-   * go back to the queue so the background router handles them instead of losing them.
+   * The lease ran out without a detach, so the session probably ended. If it never acted on the last
+   * batch it was given, the events from people in it (not worker reports, which stay visible on the
+   * workers, and not FYIs) go back to the queue so the background router handles them.
    */
   private requeueUnhandled(): void {
     const { store } = this.app;
     const turnId = Number(store.getKv('router.ext.turn') ?? 0);
     const turn = turnId ? store.get<{ actions: string | null; session: string | null }>('SELECT actions, session FROM router_turns WHERE id = ?', turnId) : undefined;
     if (!turn || turn.session !== 'attached agent' || turnActions(turn.actions).length) return;
-    const back = store.all<TriggerRow>("SELECT * FROM triggers WHERE router_turn_id = ? AND status = 'handled' AND source != 'worker'", turnId);
+    const back = store.all<TriggerRow>(
+      "SELECT * FROM triggers WHERE router_turn_id = ? AND status = 'handled' AND decision IN ('explicit', 'candidate') AND source != 'worker'",
+      turnId,
+    );
     for (const t of back) {
       store.updateTrigger(t.id, { status: 'pending', router_turn_id: null });
       emit('trigger', store.triggerById(t.id));

@@ -31,15 +31,25 @@ export async function api<T = any>(method: string, path: string, body?: unknown)
   try {
     res = await fetch(`${baseUrl()}${path}`, {
       method,
-      headers: { authorization: `Bearer ${token()}`, 'content-type': 'application/json' },
+      headers: { authorization: `Bearer ${token()}`, 'content-type': 'application/json', 'x-superagent-session': sessionId() },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
-  } catch {
-    throw new Error('SuperAgent is not running. Start it with `superagent start` (router commands start it by themselves).');
+  } catch (e) {
+    const code = (e as { cause?: { code?: string } })?.cause?.code;
+    if (code === 'ECONNREFUSED') throw new Error('SuperAgent is not running. Start it with `superagent start`.');
+    throw new Error(`Request to SuperAgent failed (${code ?? (e as Error).message}). Check \`superagent status\`.`);
   }
   const j: any = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(j?.error ?? `HTTP ${res.status}`);
   return j as T;
+}
+
+/**
+ * The calling agent session, so the router lease belongs to one session. Claude Code exposes its session
+ * id to the shells it runs; any harness can set SUPERAGENT_SESSION. Empty when unknown.
+ */
+export function sessionId(): string {
+  return (process.env.SUPERAGENT_SESSION || process.env.CLAUDE_CODE_SESSION_ID || process.env.CODEX_THREAD_ID || '').slice(0, 200);
 }
 
 /** Minimal Server-Sent Events reader over fetch. Returns a function that closes the stream. */

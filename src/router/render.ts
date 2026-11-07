@@ -175,15 +175,16 @@ export function renderAway(app: App, since: number): string {
   return lines.join('\n');
 }
 
-/** Printed by `superagent router attach`: who you are now, the context, and what you missed. */
-export function renderAttach(app: App, seenAt: number | null): string {
+/** Printed by `superagent router attach`: who you are now, the context, recent history, and what you missed. */
+export function renderAttach(app: App, away: string | null): string {
   const pending = app.store.get<{ n: number }>("SELECT COUNT(*) AS n FROM triggers WHERE status = 'pending'")?.n ?? 0;
   const parts = [
     '[SUPERAGENT] You are now the router. You talk to the user and hand every piece of real work to workers. Workers report back as events.',
     renderContext(app),
   ];
-  const history = seenAt ? renderAway(app, seenAt) : renderPrimer(app);
-  if (history) parts.push(history);
+  const primer = renderPrimer(app);
+  if (primer) parts.push(primer);
+  if (away) parts.push(away);
   parts.push(activeWorkers(app));
   parts.push(pending ? `${pending} event${pending === 1 ? ' is' : 's are'} waiting: run \`superagent events\` now.` : 'No events are waiting.');
   return parts.join('\n\n');

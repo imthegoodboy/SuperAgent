@@ -13,7 +13,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const cli = path.join(root, 'dist', 'cli.js');
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'superagent-e2e-'));
 const port = 17000 + Math.floor(Math.random() * 2000);
-const env = { ...process.env, SUPERAGENT_HOME: home, SUPERAGENT_SKIP_INTEGRATIONS: '1', NO_COLOR: '1' };
+// The CLI identifies its agent session; tests pin one so a real CLAUDE_CODE_SESSION_ID can't leak in.
+const env = { ...process.env, SUPERAGENT_HOME: home, SUPERAGENT_SKIP_INTEGRATIONS: '1', SUPERAGENT_SESSION: 'cli-session', NO_COLOR: '1' };
 let daemon;
 let token;
 
@@ -28,10 +29,11 @@ fs.writeFileSync(
   }),
 );
 
-async function call(method, p, body) {
+/** An API call, optionally as a given agent session (what the CLI sends). */
+async function call(method, p, body, session) {
   const res = await fetch(`http://127.0.0.1:${port}${p}`, {
     method,
-    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...(session ? { 'x-superagent-session': session } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   });
   const j = await res.json();
@@ -40,9 +42,9 @@ async function call(method, p, body) {
 }
 
 /** One router action, as an attached agent sends it. */
-async function act(action) {
-  const [r] = await call('POST', '/api/router/actions', { actions: [action] });
-  return r;
+async function act(action, session) {
+  const { results } = await call('POST', '/api/router/actions', { actions: [action] }, session);
+  return results[0];
 }
 
 const sa = (args, extra = {}) => spawnSync(process.execPath, [cli, ...args], { env: { ...env, ...extra }, encoding: 'utf8', timeout: 60_000 });
@@ -154,6 +156,47 @@ test('without an attached agent the background router handles events, and the ne
   const attach = await call('POST', '/api/router/attach', {});
   assert.match(attach.text, /WHILE YOU WERE AWAY/);
   assert.match(attach.text, new RegExp(`background router told the user.*${d.worker} finished`));
+});
+
+test('the lease belongs to one agent session; a replaced session is told so', async () => {
+  await call('POST', '/api/router/attach', { take: true }, 'A');
+  await call('POST', '/api/router/attach', {}, 'A'); // the same session may attach again without --take
+  const other = await call('GET', '/api/router/events', undefined, 'B').catch((e) => e);
+  assert.equal(other.status, 409);
+  assert.match(other.message, /Another agent session is the router/);
+  assert.equal((await call('POST', '/api/router/attach', {}, 'B').catch((e) => e)).status, 409);
+  await call('POST', '/api/router/attach', { take: true }, 'B');
+  const old = await call('POST', '/api/router/actions', { actions: [{ type: 'remember', text: 'x' }] }, 'A').catch((e) => e);
+  assert.equal(old.status, 409, 'the replaced session cannot act');
+  await call('POST', '/api/router/detach', {}, 'B');
+});
+
+test('detaching ends a waiting `events` call instead of handing out events twice', async () => {
+  await call('POST', '/api/router/attach', { take: true }, 'A');
+  await call('GET', '/api/router/events', undefined, 'A');
+  const started = Date.now();
+  const poll = call('GET', '/api/router/events?wait=60', undefined, 'A').catch((e) => e);
+  await new Promise((r) => setTimeout(r, 300));
+  await call('POST', '/api/router/detach', {}, 'A');
+  assert.equal((await poll).status, 409, 'the waiting poll ends right away');
+  assert.ok(Date.now() - started < 5_000);
+  const d = await act({ type: 'dispatch', task: 'after detach', title: 'After detach' }, 'C');
+  await call('POST', '/api/router/detach', {}, 'C');
+  await until(async () => (await call('GET', '/api/router')).turns.some((t) => t.session !== 'attached agent' && t.input.includes(`${d.worker} (`)));
+  const handled = (await call('GET', '/api/router')).turns.filter((t) => t.input.includes(`REPORT · ${d.worker} (`));
+  assert.equal(handled.length, 1, 'the report was handled exactly once');
+});
+
+test('an agent whose first command after a lapse is an action still hears what happened', async () => {
+  await call('POST', '/api/router/attach', { take: true });
+  const d = await act({ type: 'dispatch', task: 'lapse job', title: 'Lapse job' });
+  await call('POST', '/api/router/detach');
+  await until(async () => (await call('GET', '/api/router')).turns.some((t) => t.session !== 'attached agent' && t.input.includes(`${d.worker} (`)));
+  const { away_pending } = await call('POST', '/api/router/actions', { actions: [{ type: 'remember', text: 'back again' }] });
+  assert.equal(away_pending, true);
+  const ev = await call('GET', '/api/router/events');
+  assert.match(ev.away ?? '', new RegExp(`${d.worker} finished`));
+  assert.equal((await call('GET', '/api/router/events')).away, null, 'told once');
 });
 
 test('the lease runs out and the background router takes over by itself', async () => {
@@ -272,5 +315,7 @@ test('workers cannot use router commands', () => {
   const r = sa(['dispatch', 'spawn another worker'], { SUPERAGENT_WORKER: 'W#1' });
   assert.equal(r.status, 1);
   assert.match(r.stderr, /You are SuperAgent worker W#1/);
+  assert.equal(sa(['stop'], { SUPERAGENT_WORKER: 'W#1' }).status, 1, 'a worker cannot stop the service');
+  assert.equal(sa(['config', 'set', 'workers.maxConcurrent', '9'], { SUPERAGENT_WORKER: 'W#1' }).status, 1);
   assert.equal(sa(['workers'], { SUPERAGENT_WORKER: 'W#1' }).status, 0, 'read-only commands still work');
 });

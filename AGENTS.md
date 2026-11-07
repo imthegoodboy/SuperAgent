@@ -39,8 +39,9 @@ node dist/cli.js start --foreground   # run the daemon in this terminal
 SUPERAGENT_HOME=/tmp/sa SUPERAGENT_MOCK=1 node dist/cli.js __daemon   # isolated dev daemon with the mock agent
 ```
 
-When you run the CLI from a checkout, set `SUPERAGENT_SKIP_INTEGRATIONS=1` so it doesn't install that
-checkout's skill into your own agents, and `SUPERAGENT_SKIP_AUTOSTART=1` so it never changes start-at-login.
+With a custom `SUPERAGENT_HOME`, the CLI never touches the global agent skill folders or start-at-login.
+With the default data folder, set `SUPERAGENT_SKIP_INTEGRATIONS=1` and `SUPERAGENT_SKIP_AUTOSTART=1`
+when running a checkout, so it doesn't install that checkout's skill into your own agents.
 
 ## Rules
 

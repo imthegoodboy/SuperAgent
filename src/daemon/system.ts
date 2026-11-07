@@ -72,6 +72,15 @@ function targets(): Target[] {
 }
 
 const skillDir = (t: Target) => path.join(t.base, 'skills', 'superagent');
+
+/**
+ * The agents' skill folders and login items are global, but each data folder has its own stamp. With a
+ * data folder other than ~/.superagent (development, tests), automatic setup leaves them alone.
+ */
+function customHome(): boolean {
+  const norm = (p: string) => (process.platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p));
+  return norm(paths.home) !== norm(path.join(os.homedir(), '.superagent'));
+}
 const STAMP = () => path.join(paths.home, 'integrations.json');
 
 export interface Integration {
@@ -172,7 +181,7 @@ export function postinstallIntegrations(): Integration[] {
  * A skill someone deleted on purpose stays deleted.
  */
 export function ensureIntegrations(): void {
-  if (process.env.SUPERAGENT_SKIP_INTEGRATIONS === '1' || process.env.SUPERAGENT_WORKER) return;
+  if (process.env.SUPERAGENT_SKIP_INTEGRATIONS === '1' || process.env.SUPERAGENT_WORKER || customHome()) return;
   const st = readStamp();
   if (st?.uninstalled) return;
   const hash = skillHash();
@@ -186,7 +195,7 @@ export function ensureIntegrations(): void {
 
 /** Turn on start-at-login once, the first time SuperAgent starts. Someone who turns it off keeps it off. */
 export async function ensureAutostartOnce(): Promise<void> {
-  if (process.env.SUPERAGENT_SKIP_INTEGRATIONS === '1' || process.env.SUPERAGENT_SKIP_AUTOSTART === '1') return;
+  if (process.env.SUPERAGENT_SKIP_INTEGRATIONS === '1' || process.env.SUPERAGENT_SKIP_AUTOSTART === '1' || customHome()) return;
   const st = readStamp() ?? { hash: '', agents: [] };
   if (st.autostart !== undefined || st.uninstalled) return;
   let on = false;

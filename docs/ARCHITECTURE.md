@@ -44,9 +44,13 @@ state:
   It expires after `router.leaseMinutes` (15) of quiet or on `router detach`. A second session can't
   attach while the lease is held unless it passes `--take`. Events are acknowledged when `events`
   delivers them. If the lease then expires without any action on that last batch, its events from
-  people (not worker reports) go back to the queue for the background router. The lease is not tied to
-  a session identity: CLI calls carry none. After a `--take`, the old session's commands still work,
-  so the skill tells agents to take over only from a session that has ended.
+  people (not worker reports) go back to the queue for the background router. The lease belongs to the
+  session that holds it when its harness exposes an identity: the CLI sends `CLAUDE_CODE_SESSION_ID`
+  (or `SUPERAGENT_SESSION`, which any harness can set). Then the same session can attach again at will,
+  another session gets a 409 until it passes `--take`, and the replaced session's next command is
+  refused. A detach or take-over also ends a waiting `events --wait` call at once. Sessions without an
+  identity can't be told apart, so for them `--take` is advisory. What the background router did after
+  the lease ended is kept for the next `attach` or `events`, whichever comes first.
 - **The background router**, used whenever no lease is held: one long-lived LLM session, resumed turn
   after turn through the agent CLI's own session mechanism (`claude -p --resume`,
   `codex exec resume`, …), answering with JSON actions only. It gets no tools: with Claude Code (the

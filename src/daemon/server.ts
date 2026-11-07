@@ -4,7 +4,7 @@ import { publicConfig } from '../core/config.js';
 import { HOME_ID, pkgVersion } from '../core/paths.js';
 import { bus, emit, ref } from '../core/util.js';
 import { graphData, renderGraphMermaid, renderGraphTree, renderRecall } from '../router/render.js';
-import { normalizeActions } from '../router/router.js';
+import { LeaseConflict, normalizeActions } from '../router/router.js';
 import { resolveRepoInput } from './system.js';
 
 // The API is for the `superagent` CLI, which agents (Claude Code, Codex, …) drive. There is no web UI.
@@ -55,28 +55,37 @@ route('GET', '/api/state', ({ app }) => app.state());
 
 // ---------- the router, for an attached agent session ----------
 
-route('POST', '/api/router/attach', async ({ app, body }) => {
+/** The calling agent session's identity, when its harness exposes one (sent by the CLI). */
+const sessionOf = (req: http.IncomingMessage): string | null => String(req.headers['x-superagent-session'] ?? '').slice(0, 200) || null;
+
+/** Router commands from a session that does not hold the lease get 409 with the reason. */
+async function asRouter<T>(fn: () => T | Promise<T>): Promise<T> {
   try {
-    return await app.router.attach(!!body?.take);
+    return await fn();
   } catch (e) {
-    throw new HttpError(409, (e as Error).message);
+    if (e instanceof LeaseConflict) throw new HttpError(409, e.message);
+    throw e;
   }
-});
-route('POST', '/api/router/detach', ({ app }) => {
-  app.router.detach();
-  return { ok: true };
-});
-route('GET', '/api/router/events', ({ app, query, signal }) => {
+}
+
+route('POST', '/api/router/attach', ({ app, body, req }) => asRouter(() => app.router.attach(!!body?.take, sessionOf(req))));
+route('POST', '/api/router/detach', ({ app, req }) =>
+  asRouter(() => {
+    app.router.detach(sessionOf(req));
+    return { ok: true };
+  }),
+);
+route('GET', '/api/router/events', ({ app, query, signal, req }) => {
   // fetch() gives up on a response after 300 s, so long polls stay below that.
   const wait = Math.min(280, Math.max(0, Number(query.get('wait')) || 0));
-  return app.router.events(wait * 1000, signal);
+  return asRouter(() => app.router.events(wait * 1000, signal, sessionOf(req)));
 });
-route('POST', '/api/router/actions', ({ app, body }) => {
+route('POST', '/api/router/actions', ({ app, body, req }) => {
   const raw = Array.isArray(body?.actions) ? body.actions : body ? [body] : [];
   const actions = normalizeActions(raw);
   if (actions.length !== raw.length) throw new HttpError(400, `unknown action type in ${JSON.stringify(raw.map((a: any) => a?.type))}`);
   if (!actions.length) throw new HttpError(400, 'no actions');
-  return app.router.act(actions);
+  return asRouter(() => app.router.act(actions, sessionOf(req)));
 });
 route('GET', '/api/recall', ({ app, query }) => {
   const ids = String(query.get('ids') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
