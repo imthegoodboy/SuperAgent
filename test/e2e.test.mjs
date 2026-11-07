@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, test } from 'node:test';
@@ -36,12 +37,13 @@ async function call(method, p, body) {
   return j;
 }
 
-async function until(fn, ms = 20000) {
+// Generous limit: spawning agent processes is slow on loaded CI runners and low-memory machines.
+async function until(fn, ms = 60000, describe) {
   const end = Date.now() + ms;
   for (;;) {
     const v = await fn();
     if (v) return v;
-    if (Date.now() > end) throw new Error('timed out waiting');
+    if (Date.now() > end) throw new Error(`timed out waiting${describe ? `: ${JSON.stringify(await describe(), null, 1).slice(0, 3000)}` : ''}`);
     await new Promise((r) => setTimeout(r, 150));
   }
 }
@@ -77,15 +79,35 @@ test('rejects calls without the token, and foreign Host / Origin', async () => {
   assert.equal(evil.status, 403);
 });
 
-test('serves the UI with the token injected', async () => {
-  const html = await (await fetch(`http://127.0.0.1:${port}/`)).text();
-  assert.match(html, new RegExp(token));
+test('serves the UI without leaking the token', async () => {
+  const html = await (await fetch(`http://127.0.0.1:${port}/?t=whatever`)).text();
+  assert.match(html, /<div id="app">/);
+  assert.ok(!html.includes(token), 'the page must not contain the API token');
+  // DNS rebinding: a page on another domain that resolves to 127.0.0.1 sends its own Host header.
+  const status = await new Promise((resolve, reject) =>
+    http.get({ host: '127.0.0.1', port, path: '/', headers: { host: 'evil.example' } }, (res) => resolve(res.statusCode)).on('error', reject),
+  );
+  assert.equal(status, 421, 'foreign Host header is refused');
 });
 
 test('chat message is answered by the router', async () => {
   const { message } = await call('POST', '/api/messages', { text: 'hello there' });
   const reply = await until(async () => (await call('GET', '/api/messages')).find((m) => m.role === 'agent' && m.id > message.id));
   assert.equal(reply.text, 'Echo: hello there');
+});
+
+test('`superagent say` prints the reply and exits right away', async () => {
+  const started = Date.now();
+  const out = await new Promise((resolve, reject) => {
+    const p = spawn(process.execPath, [path.join(root, 'dist', 'cli.js'), 'say', 'are you there?'], {
+      env: { ...process.env, SUPERAGENT_HOME: home, NO_COLOR: '1' },
+    });
+    let text = '';
+    p.stdout.on('data', (c) => (text += c));
+    p.on('close', (code) => (code === 0 ? resolve(text) : reject(new Error(`exit ${code}: ${text}`))));
+  });
+  assert.match(out, /Echo: are you there\?/);
+  assert.ok(Date.now() - started < 30_000, `took ${Date.now() - started}ms`);
 });
 
 test('router dispatches a worker, worker reports back, router relays the result', async () => {
@@ -125,14 +147,32 @@ test('direct task in a git repo runs in its own worktree and branch', async () =
   assert.ok(!fs.existsSync(done.cwd), 'archive removes the worktree');
 });
 
+test('a worker that needs input waits, and its question is on the worker', async () => {
+  const w = await call('POST', '/api/workers', { task: 'ASK: set up storage' });
+  const d = await until(async () => {
+    const x = await call('GET', `/api/workers/${w.id}`);
+    return x.worker.status === 'waiting' ? x : null;
+  });
+  assert.match(d.worker.summary, /Which database should I use\?/);
+  assert.ok(d.logs.some((l) => l.kind === 'inbox' && l.text.includes('Which database')), 'question shows in the log');
+});
+
 test('messages to a finished worker resume it (pass-through inbox)', async () => {
   const w = await call('POST', '/api/workers', { task: 'first job' });
-  await until(async () => (await call('GET', `/api/workers/${w.id}`)).worker.status === 'done');
-  await call('POST', `/api/workers/${w.id}/message`, { text: 'one more thing' });
-  const detail = await until(async () => {
+  const describe = async () => {
     const d = await call('GET', `/api/workers/${w.id}`);
-    return d.runs.length === 2 && d.worker.status === 'done' ? d : null;
-  });
+    return { worker: d.worker, runs: d.runs.map((r) => ({ id: r.id, status: r.status, exit: r.exit_code })), inbox: d.inbox, active: d.active, logs: d.logs.slice(-8) };
+  };
+  await until(async () => (await call('GET', `/api/workers/${w.id}`)).worker.status === 'done', 60000, describe);
+  await call('POST', `/api/workers/${w.id}/message`, { text: 'one more thing' });
+  const detail = await until(
+    async () => {
+      const d = await call('GET', `/api/workers/${w.id}`);
+      return d.runs.length === 2 && d.worker.status === 'done' ? d : null;
+    },
+    60000,
+    describe,
+  );
   assert.match(detail.runs[1].prompt, /one more thing/);
   assert.equal(detail.worker.run_count, 2);
 });

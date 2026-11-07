@@ -11,7 +11,7 @@ import fs from 'node:fs';
 const mode = process.argv[2] ?? 'worker';
 const resumeIdx = process.argv.indexOf('--resume');
 const session = resumeIdx > 0 ? process.argv[resumeIdx + 1] : crypto.randomUUID();
-const delay = Number(process.env.MOCK_DELAY_MS ?? 50);
+const delay = Number((mode === 'router' ? process.env.MOCK_ROUTER_DELAY_MS : undefined) ?? process.env.MOCK_DELAY_MS ?? 50);
 
 function out(obj: unknown): void {
   process.stdout.write(JSON.stringify(obj) + '\n');
@@ -52,9 +52,9 @@ function parseEvents(input: string): Ev[] {
 async function main(): Promise<void> {
   const input = await readStdin();
   out({ type: 'system', subtype: 'init', session_id: session });
-  await new Promise((r) => setTimeout(r, delay));
 
   if (mode === 'router') {
+    await new Promise((r) => setTimeout(r, delay));
     const actions: any[] = [];
     for (const ev of parseEvents(input)) {
       if (ev.label === 'REPORT') {
@@ -74,8 +74,11 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Activity first, then stay busy for `delay` ms, so a running mock worker looks like a real one.
   const title = input.match(/^# SuperAgent task W#\d+: (.*)$/m)?.[1] ?? input.split('\n')[0].slice(0, 60);
   out({ type: 'assistant', message: { content: [{ type: 'text', text: `Working on: ${title}` }] } });
+  out({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'git status --short' } }] } });
+  out({ type: 'user', message: { content: [{ type: 'tool_result', content: 'clean' }] } });
   out({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Write', input: { file_path: 'mock-output.txt' } }] } });
   fs.writeFileSync('mock-output.txt', `mock agent was here\n${title}\n`);
   out({ type: 'user', message: { content: [{ type: 'tool_result', content: 'File written' }] } });
@@ -84,7 +87,10 @@ async function main(): Promise<void> {
     out({ type: 'result', subtype: 'error', is_error: true, session_id: session, result: 'mock failure' });
     process.exit(1);
   }
-  const report = { status: 'done', summary: `Mock finished: ${title}` };
+  // A task containing "ASK:" makes the mock stop and ask the human a question.
+  const report = /\bASK:/.test(input)
+    ? { status: 'needs_input', summary: 'Need a decision before going on.', question: 'Which database should I use?' }
+    : { status: 'done', summary: `Mock finished: ${title}` };
   out({
     type: 'result',
     subtype: 'success',

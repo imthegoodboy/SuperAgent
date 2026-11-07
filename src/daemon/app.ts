@@ -115,7 +115,7 @@ export class App {
   }
 
   state() {
-    const workers = this.store.listWorkers(false, 500);
+    const workers = this.store.listWorkers('current', 500);
     const counts: Record<string, number> = {};
     for (const w of workers) counts[w.status] = (counts[w.status] ?? 0) + 1;
     return {

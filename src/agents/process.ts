@@ -41,10 +41,11 @@ export function which(name: string): string | null {
  */
 export function parseCmdShim(content: string, shimPath: string): Resolved | null {
   const dir = path.dirname(shimPath);
-  let m = content.match(/"%dp0%\\([^"]+?\.exe)"/i);
-  if (m) return { file: path.join(dir, m[1]), prefix: [], via: 'exe', path: shimPath };
-  m = content.match(/"%dp0%\\([^"]+?\.(?:js|cjs|mjs))"/i);
+  // JS entry first: npm shims for node CLIs also mention "%dp0%\node.exe" as the interpreter.
+  let m = content.match(/"%dp0%\\([^"]+?\.(?:js|cjs|mjs))"/i);
   if (m) return { file: process.execPath, prefix: [path.join(dir, m[1])], via: 'node', path: shimPath };
+  const exe = [...content.matchAll(/"%dp0%\\([^"]+?\.exe)"/gi)].map((x) => x[1]).find((p) => !/(^|\\)node\.exe$/i.test(p));
+  if (exe) return { file: path.join(dir, exe), prefix: [], via: 'exe', path: shimPath };
   m = content.match(/-File\s+"%SCRIPT_DIR%\\([^"]+?\.ps1)"/i);
   if (m) {
     const ps = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
@@ -110,6 +111,14 @@ export interface ProcHandle {
 const KEEP = 256 * 1024;
 
 export function startProcess(resolved: Resolved, opts: ProcOptions): ProcHandle {
+  // spawn() reports a missing working directory as "ENOENT" on the program itself, which is misleading.
+  if (!fs.existsSync(opts.cwd)) {
+    return {
+      pid: undefined,
+      kill: () => {},
+      done: Promise.resolve({ code: null, stdout: '', stderr: '', timedOut: false, spawnError: `working directory does not exist: ${opts.cwd}` }),
+    };
+  }
   let args = [...resolved.prefix, ...opts.args];
   let verbatim = false;
   if (resolved.via === 'cmd') {
@@ -159,17 +168,24 @@ export function startProcess(resolved: Resolved, opts: ProcOptions): ProcHandle 
     : null;
 
   const done = new Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean; spawnError?: string }>((resolve) => {
-    child.on('error', (err) => {
-      spawnError = err.message;
-    });
-    child.on('close', (code) => {
+    let settled = false;
+    const settle = (code: number | null) => {
+      if (settled) return;
+      settled = true;
       if (timer) clearTimeout(timer);
       for (const stream of ['stdout', 'stderr'] as const) {
         if (bufs[stream].trim()) opts.onLine?.(bufs[stream].replace(/\r$/, ''), stream);
         bufs[stream] = '';
       }
       resolve({ code, stdout, stderr, timedOut, spawnError });
+    };
+    // A failed spawn (missing binary, out of memory) may emit 'error' without ever emitting 'close';
+    // settle anyway so a worker slot or the router can never hang on it.
+    child.on('error', (err) => {
+      spawnError = err.message;
+      setTimeout(() => settle(null), 1000);
     });
+    child.on('close', (code) => settle(code));
   });
 
   return { pid: child.pid, done, kill };
