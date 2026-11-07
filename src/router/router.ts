@@ -25,7 +25,7 @@ OUTPUT
 Reply with JSON only: {"actions":[...]}. Action types:
 - {"type":"reply","thread":"TH#1","text":"..."}: send a message to a thread.
 - {"type":"dispatch","title":"short title","task":"complete, self-contained instructions","repo":"repo name (optional)","agent":"claude|codex|opencode|cursor (optional)","threads":["TH#8"],"reply_thread":"TH#1","silent":false}: start a new Worker. "threads" = GitHub threads the worker should follow (their new events go straight to it). "reply_thread" = where results should be reported.
-- {"type":"message_worker","worker":"W#3","text":"..."}: forward new instructions or information to an existing worker (it resumes with full memory of its task).
+- {"type":"message_worker","worker":"W#3","text":"...","now":false}: forward new instructions or information to an existing worker (it resumes with full memory of its task). "now":true interrupts a run in progress (a change of plan, or a worker going in circles); otherwise the message waits until the current run ends.
 - {"type":"stop_worker","worker":"W#3","reason":"..."}
 - {"type":"subscribe","worker":"W#3","thread":"TH#9"} and {"type":"unsubscribe","worker":"W#3","thread":"TH#9"}
 - {"type":"recall","ids":["T#42","TH#8","W#3"]}: read objects in full; you get another turn with the results.
@@ -64,6 +64,7 @@ export const ROUTER_SCHEMA = {
           reply_thread: { type: 'string' },
           silent: { type: 'boolean' },
           worker: { type: 'string' },
+          now: { type: 'boolean' },
           reason: { type: 'string' },
           ids: { type: 'array', items: { type: 'string' } },
           triggers: { type: 'array', items: { type: 'string' } },
@@ -684,8 +685,10 @@ export class Router {
         const id = parseRefOf('W', a.worker);
         if (!id || !store.workerById(id)) throw new Error(`unknown worker ${a.worker}`);
         if (!String(a.text ?? '').trim()) throw new Error('message_worker needs text');
+        // `now`: interrupt the run in progress and resume it with this message, instead of queueing it.
+        if (a.now && workers.isActive(id) && workers.restartRun(id, String(a.text), 'router')) return { worker: ref.W(id), interrupted: true };
         workers.message(id, 'router', String(a.text));
-        return { worker: ref.W(id) };
+        return { worker: ref.W(id), interrupted: false };
       }
       case 'stop_worker': {
         const id = parseRefOf('W', a.worker);

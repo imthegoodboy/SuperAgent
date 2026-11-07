@@ -85,7 +85,7 @@ chat), `W#n` a worker. Long text is cut (`… [+N chars: recall T#n]`); use `sup
 ```bash
 superagent dispatch "<task>" [--agent claude|codex|opencode|cursor] [--repo web|owner/repo|.]
                              [--title "Short title"] [--follow TH#8,TH#9] [--reply TH#8] [--silent]
-superagent tell W#3 "<new instructions or information>"   # it resumes with full memory of its task
+superagent tell W#3 "<new instructions or information>" [--now]   # resumes with its memory; --now interrupts
 superagent cancel W#3 [--reason "…"]
 superagent reply TH#8 "<message>"                        # GitHub issue/PR comment, Telegram message
 superagent ignore T#41 T#42 [--reason "…"]
@@ -126,6 +126,12 @@ A worker starts with nothing but your task text. Write it like a brief to a stro
 - every relevant detail from the conversation: file paths, error messages, links, decisions, constraints;
 - for GitHub work, the issue or PR link, and `--follow` its thread so review comments and CI reach the
   worker directly.
+
+Say how to verify, in proportion to the task ("a syntax check is enough", "run the unit tests", "no
+browser needed"). Workers otherwise tend to test everything, which is slow, and some tools (browsers,
+GUIs) can't run in an agent's sandbox. If `superagent workers` shows a worker going in circles, redirect
+it with `superagent tell W#n "…" --now`, which interrupts its run; without `--now` the message waits
+until the run ends.
 
 Don't split a task into steps; the worker plans. One worker per independent task. Follow-ups, corrections
 or a change of plan for an existing task go to that worker with `tell`, even if they arrive from another
