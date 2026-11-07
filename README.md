@@ -85,11 +85,12 @@ one ("use Codex", "with OpenCode").
 ```sh
 superagent repo add .                    # the repo you're in
 superagent repo add owner/name           # cloned on first use
-superagent repo add owner/name --mode all   # react to every issue and comment, not only mentions
+superagent repo add owner/name --mode all   # consider every issue and comment, not only mentions
 ```
 
-On GitHub, write **`/superagent`** in an issue or comment to call it. By default only you can trigger
-it; change who can in Settings.
+On GitHub, write **`/superagent`** in an issue or comment to call it. Only allowlisted GitHub users
+can trigger it, and the list starts with just you, so `--mode all` watches *your* activity until you
+add people with `--allow alice,bob` or in Settings.
 
 **From the terminal:**
 
@@ -116,15 +117,18 @@ replies are short.
 ## Safety
 
 - Everything runs locally. The API listens on `127.0.0.1` only, needs a token stored in your data
-  folder, and rejects requests from other websites.
+  folder, and rejects requests from other websites. The desktop app and `superagent open` hand the
+  token to the page once; the page itself never contains it.
 - Workers run in their own worktrees under `~/.superagent/worktrees`, never in your checkout. They are
   told to push only their own `superagent/...` branch, open **draft** PRs, and never merge or push to
   your main branch. These rules are instructions to the agents, not technical locks, so review PRs as you
   would any contributor's.
 - With **Full** autonomy (the default) agents run commands without asking for approval. Choose
   **Safe** in Settings to use each agent's own sandbox and approval mode instead.
-- On GitHub, only allowlisted users can trigger work (you, by default). Text from GitHub and Telegram is
-  treated as data, not instructions.
+- On GitHub, only allowlisted users can trigger work (you, by default). Text from GitHub and Telegram
+  is marked as untrusted data in the router's and workers' prompts, and they are told not to follow
+  instructions in it. That lowers the risk of prompt injection but cannot rule it out, which is why the
+  allowlist starts with just you. Widen it only to people you trust.
 - SuperAgent never asks for or stores your agent credentials; each agent uses its own login.
 
 ## Where things live

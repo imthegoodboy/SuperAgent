@@ -29,16 +29,19 @@ they come from the system around the agents.
 **Router layer:** `src/router/router.ts`. One long-lived LLM session, resumed turn after turn through
 the agent CLI's own session mechanism (`claude -p --resume`, `codex exec resume`, …). It receives every
 event that needs a decision and answers with JSON **actions** only: `reply`, `dispatch`,
-`message_worker`, `stop_worker`, `subscribe`, `unsubscribe`, `recall`, `ignore`, `remember`. It has no
-tools (`--tools ""` for Claude Code), so it can't drift into doing work itself; the design's own
-experiment found single sessions with a subagent tool often do just that. The router defaults to a
-small, fast model (`haiku`).
+`message_worker`, `stop_worker`, `subscribe`, `unsubscribe`, `recall`, `ignore`, `remember`. It
+gets no tools, so it can't drift into doing work itself; the design's own experiment found that
+single sessions with a subagent tool often do just that. With Claude Code (the default) the router
+runs with `--tools ""`; with the other agents it uses their most restricted mode (Codex `read-only`
+sandbox, OpenCode's `plan` agent, Cursor's `ask` mode). The router defaults to a small, fast model
+(`haiku`).
 
 **Batching:** while a router turn is running, new events queue in SQLite. The next turn takes all of
 them at once (`router.maxBatch`), so bursts are handled in one call (Section 2.1, 7.2).
 
 **Worker layer:** `src/workers/manager.ts`. Each worker is one task with an isolated context: a headless
-coding-agent session (`src/agents/adapters.ts`) running in its own git worktree and branch
+coding-agent session (`src/agents/adapters.ts`) running in its own git worktree and branch when the
+task belongs to a configured repository, or in its own scratch folder otherwise
 (`src/workers/workspace.ts`). Workers never talk to people. They end each run with a
 `<superagent-report>` block (status, summary, PR URL, question), which becomes an event for the router.
 Follow-ups resume the same agent session, so a worker keeps its memory of the task across runs.
@@ -96,10 +99,13 @@ The design puts the agent loop in the cloud and connects personal machines throu
 daemons. SuperAgent deliberately stays local (no accounts, nothing hosted), so it applies the same
 separation on one machine:
 
-- **State is separate from compute.** All sessions, threads, triggers, workers, runs and logs live in
-  SQLite (`src/core/store.ts`, WAL mode). The daemon process holds no state that matters: if it
-  crashes, the watchdog restarts it, `WorkerManager.recover()` re-queues interrupted workers, and they
-  resume from their saved agent sessions with a note that they were interrupted.
+- **State is separate from compute.** Threads, triggers, workers, runs, logs, router turns, memory,
+  and the session IDs of the router and every worker live in SQLite (`src/core/store.ts`, WAL mode).
+  The conversations themselves stay in each agent CLI's own session store, which SuperAgent resumes
+  by ID. The daemon process holds no state that matters: if it crashes, the watchdog restarts it,
+  `WorkerManager.recover()` re-queues interrupted workers, and they resume their agent sessions with a
+  note that they were interrupted. If a session is gone, the worker starts its task over in the same
+  workspace.
 - **Environments stay where they are.** Workers run against your real checkouts (as worktrees), with
   your local toolchains and credentials, and never move code anywhere.
 - **Intermittent connectivity.** When the computer sleeps, everything pauses. On wake, GitHub polling
@@ -122,10 +128,15 @@ Every intervention is recorded and shown under Activity → Watchdog.
 ## Local API and UI
 
 `src/daemon/server.ts` serves a JSON API, a Server-Sent Events stream (`/api/events`) and the static UI
-in `ui/`, on `127.0.0.1` only. Every API call needs the token from `~/.superagent/token` (injected into
-the page the daemon serves). Requests with a foreign `Host` (DNS rebinding) or `Origin` (cross-site) are
-rejected. The desktop app (`desktop/`, Tauri) checks the health endpoint, runs `superagent start` if
-needed, and loads that same page.
+in `ui/`, on `127.0.0.1` only. Every API route except `/api/health` needs the token from
+`~/.superagent/token`. The page itself contains no secret: the desktop app and `superagent open` pass
+the token once as `?t=…`, and the page keeps it in local storage and removes it from the address bar.
+Requests with a foreign `Host` (DNS rebinding) or `Origin` (cross-site) are rejected. The desktop app
+(`desktop/`, Tauri) checks the health endpoint, runs `superagent start` if needed, and loads that page.
+
+Text from GitHub and Telegram reaches models as quoted data: the router prompt says event text never
+overrides its rules, and worker prompts wrap it in `<external-content>` with the same instruction.
+This lowers prompt-injection risk; the per-repo allowlist is the actual gate on who can trigger work.
 
 ## Agent adapters
 
