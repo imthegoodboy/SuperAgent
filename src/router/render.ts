@@ -146,7 +146,7 @@ function activeWorkers(app: App): string {
   return [
     '[ACTIVE WORKERS]',
     ...(active.length ? shown.map((w) => `- ${workerBrief(app, w)}`) : ['- none']),
-    ...(more > 0 ? [`- … and ${more} more waiting (superagent workers)`] : []),
+    ...(more > 0 ? [`- … and ${more} more active (superagent workers)`] : []),
   ].join('\n');
 }
 

@@ -32,11 +32,11 @@ function resolveAdapter(adapter: AgentAdapter): Resolved | null {
  * undo Node's escaping of `"` as `\"`. Very long prompts would also exceed the command-line limit.
  */
 export function promptArg(prompt: string, via: Resolved['via'], platform: string = process.platform): string {
-  const direct = (via === 'exe' || via === 'node' || via === 'plain') && platform !== 'win32' && prompt.length <= 100_000;
+  const direct = (via === 'exe' || via === 'node' || via === 'plain') && platform !== 'win32' && Buffer.byteLength(prompt) <= 100_000;
   if (direct) return prompt;
   const file = path.join(paths.prompts, `${Date.now()}-${crypto.randomBytes(4).toString('hex')}.md`);
   fs.mkdirSync(paths.prompts, { recursive: true });
-  fs.writeFileSync(file, prompt);
+  fs.writeFileSync(file, prompt, { mode: 0o600 }); // task text is private; deleted when the run ends
   return `Read the file ${file} and follow the instructions in it exactly.`;
 }
 
@@ -78,16 +78,19 @@ function launch(
     onEvent(ev);
   };
 
-  const fullArgs = adapter.promptVia === 'arg' ? [...args, promptArg(prompt, resolved.via)] : args;
+  const promptText = adapter.promptVia === 'arg' ? promptArg(prompt, resolved.via) : null;
+  const promptFile = promptText?.match(/^Read the file (.+?) and follow/)?.[1] ?? null;
+  const fullArgs = promptText !== null ? [...args, promptText] : args;
   const proc = startProcess(resolved, {
     cwd,
     args: fullArgs,
     stdin: adapter.promptVia === 'stdin' ? prompt : undefined,
     env,
     timeoutMs,
+    // Any output, even without a newline, is a sign of life (a long subagent or build prints nothing
+    // the parser keeps).
+    onChunk: () => handle({ kind: 'ping' }),
     onLine: (line, stream) => {
-      // Any output is a sign of life (a long subagent or build prints nothing the parser keeps).
-      handle({ kind: 'ping' });
       if (stream === 'stdout') {
         for (const ev of parse(line)) handle(ev);
       }
@@ -95,6 +98,7 @@ function launch(
   });
 
   const done = proc.done.then((r) => {
+    if (promptFile) fs.rmSync(promptFile, { force: true });
     let error: string | null = null;
     if (r.spawnError) error = `Could not start ${adapter.label}: ${r.spawnError}`;
     else if (r.timedOut) error = `${adapter.label} timed out.`;

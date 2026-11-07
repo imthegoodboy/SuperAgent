@@ -201,23 +201,25 @@ type Rule =
   | { kind: 'number'; min: number; max: number; int?: boolean }
   | { kind: 'boolean' }
   | { kind: 'string'; nonEmpty?: boolean }
-  | { kind: 'enum'; values: readonly string[] }
+  | { kind: 'enum'; values: readonly string[] | (() => readonly string[]) }
   | { kind: 'strings' }
-  | { kind: 'array' };
+  | { kind: 'repos' }
+  | { kind: 'chats' };
 
-const AGENT_CHOICES = [...AGENT_IDS, 'mock'] as const;
+/** The mock agent exists only for tests and demos (SUPERAGENT_MOCK=1). */
+const agentChoices = (): readonly string[] => (process.env.SUPERAGENT_MOCK === '1' ? [...AGENT_IDS, 'mock'] : AGENT_IDS);
 
 /** Every setting a person or agent may change, with what it accepts. `*` matches one agent id. */
 const RULES: Record<string, Rule> = {
   port: { kind: 'number', min: 1024, max: 65535, int: true },
   mention: { kind: 'string', nonEmpty: true },
   policies: { kind: 'string' },
-  'router.agent': { kind: 'enum', values: AGENT_CHOICES },
+  'router.agent': { kind: 'enum', values: agentChoices },
   'router.model': { kind: 'string' },
   'router.maxBatch': { kind: 'number', min: 1, max: 100, int: true },
   'router.rotateAfterTurns': { kind: 'number', min: 1, max: 10_000, int: true },
   'router.leaseMinutes': { kind: 'number', min: 0.01, max: 24 * 60 },
-  'workers.defaultAgent': { kind: 'enum', values: AGENT_CHOICES },
+  'workers.defaultAgent': { kind: 'enum', values: agentChoices },
   'workers.maxConcurrent': { kind: 'number', min: 1, max: 16, int: true },
   'workers.autonomy': { kind: 'enum', values: ['full', 'safe'] },
   'workers.allowDraftPRs': { kind: 'boolean' },
@@ -226,13 +228,13 @@ const RULES: Record<string, Rule> = {
   'workers.minFreeMemoryMB': { kind: 'number', min: 0, max: 1_000_000, int: true },
   'agents.*.enabled': { kind: 'boolean' },
   'agents.*.model': { kind: 'string' },
-  repos: { kind: 'array' },
+  repos: { kind: 'repos' },
   'github.enabled': { kind: 'boolean' },
   'github.pollSeconds': { kind: 'number', min: 15, max: 24 * 3600, int: true },
   'github.reviewBots': { kind: 'strings' },
   'telegram.enabled': { kind: 'boolean' },
   'telegram.botToken': { kind: 'string' },
-  'telegram.chats': { kind: 'array' },
+  'telegram.chats': { kind: 'chats' },
   'telegram.allowUsers': { kind: 'strings' },
   'watchdog.enabled': { kind: 'boolean' },
   'watchdog.llmChecks': { kind: 'boolean' },
@@ -272,12 +274,21 @@ function check(key: string, rule: Rule, v: unknown): string | null {
       return typeof v === 'boolean' ? null : `${key} must be true or false (got ${JSON.stringify(v)})`;
     case 'string':
       return typeof v !== 'string' ? `${key} must be text` : rule.nonEmpty && !v.trim() ? `${key} can't be empty` : null;
-    case 'enum':
-      return rule.values.includes(v as string) ? null : `${key} must be one of ${rule.values.join(', ')} (got ${JSON.stringify(v)})`;
+    case 'enum': {
+      const values = typeof rule.values === 'function' ? rule.values() : rule.values;
+      return values.includes(v as string) ? null : `${key} must be one of ${values.join(', ')} (got ${JSON.stringify(v)})`;
+    }
     case 'strings':
       return Array.isArray(v) && v.every((x) => typeof x === 'string') ? null : `${key} must be a list of names, e.g. '["alice","bob"]'`;
-    case 'array':
-      return Array.isArray(v) ? null : `${key} must be a list`;
+    case 'repos': {
+      const str = (x: unknown) => x === undefined || typeof x === 'string';
+      const okRepo = (r: any) => isObject(r) && str(r.name) && str(r.slug) && str(r.path) && (!!r.slug || !!r.path) && (r.allowUsers === undefined || Array.isArray(r.allowUsers));
+      return Array.isArray(v) && v.every(okRepo) ? null : `${key} must be a list of repositories, each with a "slug" (owner/repo) or a "path"`;
+    }
+    case 'chats':
+      return Array.isArray(v) && v.every((c) => isObject(c) && typeof c.id === 'string')
+        ? null
+        : `${key} must be a list like '[{"id":"-100123","mode":"mentions"}]'`;
   }
 }
 
@@ -309,8 +320,8 @@ export function applyConfigPatch(cfg: Config, patch: unknown): Config {
   if (unknown.length) throw new Error(`Unknown setting${unknown.length > 1 ? 's' : ''}: ${unknown.join(', ')}. See \`superagent config\` for all settings.`);
   const next = merge(cfg, patch);
   if (next.telegram.botToken.startsWith('••••')) next.telegram.botToken = cfg.telegram.botToken;
-  next.repos = (next.repos ?? []).map(normalizeRepo);
-  const errors = validateConfig(next);
+  const errors = validateConfig(next); // before normalizing: a malformed repo entry must be refused, not crash
   if (errors.length) throw new Error(errors.join('; '));
+  next.repos = next.repos.map(normalizeRepo);
   return next;
 }

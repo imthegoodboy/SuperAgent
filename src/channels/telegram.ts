@@ -96,7 +96,7 @@ export class TelegramSource {
     let mode = chat?.mode;
     let dropReason: string | undefined;
     if (msg.from?.is_bot) dropReason = 'bot account';
-    else if (!isPrivate && allow.length && !userAllowed) dropReason = `${username ? '@' + username : author} is not on the allowlist`;
+    else if (allow.length && !userAllowed) dropReason = `${username ? '@' + username : author} is not on the allowlist`;
     if (!mode) {
       if (isPrivate && userAllowed) mode = 'all';
       else dropReason ??= `unknown chat ${chatId} (${msg.chat.title ?? '@' + author}); add it with \`superagent config set telegram.chats '[{"id":"${chatId}","mode":"mentions"}]'\` (keep any chats already listed)`;

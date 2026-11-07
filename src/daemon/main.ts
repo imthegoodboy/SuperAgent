@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { answers, clearInstance, readInstance, writeInstance } from '../core/instance.js';
+import { commandLine } from '../agents/process.js';
 import { paths } from '../core/paths.js';
 import { log } from '../core/util.js';
 import { App } from './app.js';
@@ -12,7 +13,8 @@ export const EXIT_ALREADY_RUNNING = 4;
 
 export async function runDaemon(): Promise<void> {
   const other = readInstance();
-  if (other && other.pid !== process.pid && (await answers(other.port))) {
+  // A daemon that is alive but not answering (busy, hung) still owns this data folder and database.
+  if (other && other.pid !== process.pid && ((await answers(other.port)) || (await commandLine(other.pid)).includes('__daemon'))) {
     log(`SuperAgent already runs for this data folder (pid ${other.pid}, port ${other.port}); not starting a second one`);
     process.exit(EXIT_ALREADY_RUNNING);
   }

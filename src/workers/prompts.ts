@@ -35,7 +35,7 @@ export function workerSystem(app: App, w: WorkerRow, ws: Workspace): string {
     lines.push(`- You are on git branch \`${ws.branch}\` (created from \`${ws.base}\`). Commit your changes to this branch with clear messages. Commit only files that belong to the task: never caches, temporary folders or tool state (stage paths explicitly rather than \`git add -A\`).`);
     if (repo?.slug && app.config.workers.allowDraftPRs) {
       lines.push(
-        `- When the work is complete and verified, push your branch (\`git push -u origin ${ws.branch}\`) and open a DRAFT pull request against \`${defaultBranch}\` with \`gh pr create --draft\`. Write a complete PR description (problem, change, how it was verified) and end the body with the line \`<!-- superagent:${ref.W(w.id)} -->\`. If a PR for your branch already exists, just push to it.`,
+        `- When the work is complete and verified, push your branch (\`git push -u origin ${ws.branch}\`) and open a DRAFT pull request against \`${defaultBranch}\` with \`gh pr create --draft --base ${defaultBranch}\`. Write a complete PR description (problem, change, how it was verified) and end the body with the line \`<!-- superagent:${ref.W(w.id)} -->\`. If a PR for your branch already exists, just push to it.`,
       );
     } else {
       lines.push('- Do not push or open pull requests; leave your commits on the local branch.');

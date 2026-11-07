@@ -11,19 +11,21 @@ function isBot(user: any): boolean {
   return user?.type === 'Bot' || /\[bot\]$/.test(user?.login ?? '');
 }
 
-async function ghJson(pathAndQuery: string): Promise<any> {
-  const r = await run('gh', ['api', '-H', 'Accept: application/vnd.github+json', pathAndQuery], { timeoutMs: 60_000 });
-  if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().slice(0, 300) || `gh api ${pathAndQuery} failed`);
-  return tryJson(r.stdout);
-}
-
 /** Every page of a list endpoint (after a weekend asleep, or in a busy repo, page 1 is not enough). */
-async function ghList(pathAndQuery: string): Promise<any[]> {
-  const r = await run('gh', ['api', '--paginate', '--slurp', '-H', 'Accept: application/vnd.github+json', pathAndQuery], { timeoutMs: 3 * 60_000 });
+async function ghPages(pathAndQuery: string): Promise<any[]> {
+  // Every page in one JSON array; keep all of it (the default 256 KB tail would cut it).
+  const r = await run('gh', ['api', '--paginate', '--slurp', '-H', 'Accept: application/vnd.github+json', pathAndQuery], {
+    timeoutMs: 3 * 60_000,
+    keepBytes: 64 * 1024 * 1024,
+  });
   if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().slice(0, 300) || `gh api ${pathAndQuery} failed`);
   const pages = tryJson<any[]>(r.stdout);
   if (!Array.isArray(pages)) throw new Error(`gh api ${pathAndQuery}: unexpected output`);
-  return pages.flat();
+  return pages;
+}
+
+async function ghList(pathAndQuery: string): Promise<any[]> {
+  return (await ghPages(pathAndQuery)).flat();
 }
 
 /** Review bots whose comments reach the worker that follows the PR (other bots are noise). */
@@ -236,11 +238,13 @@ export class GitHubSource {
     }
 
     if (repo.ci !== 'off') {
-      const runs: any = await ghJson(`repos/${slug}/actions/runs?per_page=50`).catch((e) => {
+      // Only runs created since the day before the cursor, every page of them.
+      const day = new Date(since - 86_400_000).toISOString().slice(0, 10);
+      const pages = await ghPages(`repos/${slug}/actions/runs?per_page=100&created=${encodeURIComponent('>=' + day)}`).catch((e) => {
         failures.push(`CI runs: ${(e as Error).message}`);
-        return null;
+        return [];
       });
-      for (const wr of runs?.workflow_runs ?? []) {
+      for (const wr of pages.flatMap((p: any) => p?.workflow_runs ?? [])) {
         if (wr.status !== 'completed' || Date.parse(wr.updated_at) < since) continue;
         let threadKey = `github:${slug}@${wr.head_branch}`;
         let subscribable = false;

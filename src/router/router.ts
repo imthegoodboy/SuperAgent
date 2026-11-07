@@ -404,7 +404,8 @@ export class Router {
       store.updateTurn(turnId, { ended_at: Date.now(), session: 'attached agent' });
       store.setKv('router.ext.turn', String(turnId));
     }
-    store.updateTurn(turnId, { actions: JSON.stringify([...turnActions(turn?.actions ?? null), ...actions]) });
+    const succeeded = actions.filter((_, i) => results[i]?.ok);
+    store.updateTurn(turnId, { actions: JSON.stringify([...turnActions(turn?.actions ?? null), ...succeeded]) });
     emit('router_turn', store.get('SELECT * FROM router_turns WHERE id = ?', turnId));
     // The "while you were away" summary waits for the next `events`; say that it is there.
     return { results, away_pending: !!store.getKv('router.awaySince') };
@@ -419,11 +420,24 @@ export class Router {
     const { store } = this.app;
     const turnId = Number(store.getKv('router.ext.turn') ?? 0);
     const turn = turnId ? store.get<{ actions: string | null; session: string | null }>('SELECT actions, session FROM router_turns WHERE id = ?', turnId) : undefined;
-    if (!turn || turn.session !== 'attached agent' || turnActions(turn.actions).length) return;
-    const back = store.all<TriggerRow>(
-      "SELECT * FROM triggers WHERE router_turn_id = ? AND status = 'handled' AND decision IN ('explicit', 'candidate') AND source != 'worker'",
-      turnId,
-    );
+    if (!turn || turn.session !== 'attached agent') return;
+    const acts = turnActions(turn.actions);
+    const th = (v: unknown) => parseRefOf('TH', v);
+    // An event counts as handled when an action points at it (ignore T#n) or at its thread (a reply there,
+    // a dispatch that follows or reports to it). Events without a thread: any action at all.
+    const handled = (t: TriggerRow) =>
+      acts.some(
+        (a) =>
+          (a.type === 'ignore' && (a.triggers ?? []).some((x: unknown) => parseRefOf('T', x) === t.id)) ||
+          (!!t.thread_id && a.type === 'reply' && th(a.thread) === t.thread_id) ||
+          (!!t.thread_id && a.type === 'dispatch' && (th(a.reply_thread) === t.thread_id || (a.threads ?? []).some((x: unknown) => th(x) === t.thread_id))),
+      ) || (!t.thread_id && acts.length > 0);
+    const back = store
+      .all<TriggerRow>(
+        "SELECT * FROM triggers WHERE router_turn_id = ? AND status = 'handled' AND decision IN ('explicit', 'candidate') AND source != 'worker'",
+        turnId,
+      )
+      .filter((t) => !handled(t));
     for (const t of back) {
       store.updateTrigger(t.id, { status: 'pending', router_turn_id: null });
       emit('trigger', store.triggerById(t.id));
@@ -659,6 +673,7 @@ export class Router {
             if (repo) break;
           }
         }
+        if (a.base && !repo) throw new Error('--base needs a repository (--repo)');
         const requested = String(a.agent ?? '').toLowerCase();
         if (by === 'agent' && requested && !this.app.availableAgents().includes(requested as AgentId)) {
           throw new Error(`agent "${requested}" is not available. Available: ${this.app.availableAgents().join(', ') || 'none'}`);
@@ -680,7 +695,6 @@ export class Router {
           createdBy: 'router',
         });
         if (requested && requested !== agent) this.note(`${ref.W(w.id)} uses ${agent} because ${requested} is not available.`);
-        if (by === 'agent' && a.base && !repo) throw new Error('--base needs a repository (--repo)');
         const now = store.workerById(w.id)!;
         return {
           worker: ref.W(w.id),

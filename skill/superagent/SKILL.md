@@ -152,7 +152,7 @@ so it does not see uncommitted changes. If the task depends on them, ask the use
 or describe the changes in the task. To build on a branch other than the default, pass `--base <branch>`.
 
 `dispatch` says when a worker is **queued** (all slots busy, or too little free memory); it starts by
-itself when a slot frees up.
+itself once a slot is free and there is enough memory.
 
 ## Rules
 

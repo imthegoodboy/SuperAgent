@@ -63,7 +63,8 @@ export function clientDescription(): string {
   const e = process.env;
   const kind = e.CLAUDECODE || e.CLAUDE_CODE_SESSION_ID ? 'Claude Code' : e.CODEX_THREAD_ID || e.CODEX_SANDBOX ? 'Codex' : e.OPENCODE ? 'OpenCode' : e.CURSOR_AGENT ? 'Cursor' : 'a terminal';
   const id = sessionId();
-  return `${kind}${id ? ` session ${id.slice(0, 8)}` : ''} in ${process.cwd()}`.slice(0, 300);
+  // HTTP header values are Latin-1: encode, so a folder named in Hindi or with an emoji still works.
+  return encodeURIComponent(`${kind}${id ? ` session ${id.slice(0, 8)}` : ''} in ${process.cwd()}`.slice(0, 300));
 }
 
 /** Minimal Server-Sent Events reader over fetch. Returns a function that closes the stream. */

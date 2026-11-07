@@ -44,7 +44,7 @@ export class App {
   async init(): Promise<void> {
     this.agentsReady = this.refreshAgents().catch(() => {});
     await this.agentsReady;
-    this.workers.recover();
+    await this.workers.recover();
     this.router.kick();
     this.github.start();
     this.telegram.start();

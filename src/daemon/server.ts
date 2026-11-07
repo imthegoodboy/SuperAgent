@@ -61,7 +61,14 @@ route('GET', '/api/state', ({ app }) => app.state());
 /** The calling agent session's identity, when its harness exposes one (sent by the CLI). */
 const sessionOf = (req: http.IncomingMessage): string | null => String(req.headers['x-superagent-session'] ?? '').slice(0, 200) || null;
 /** Where the calling session runs, shown to anyone the lease turns away. */
-const whoOf = (req: http.IncomingMessage): string | null => String(req.headers['x-superagent-client'] ?? '').slice(0, 300) || null;
+const whoOf = (req: http.IncomingMessage): string | null => {
+  const raw = String(req.headers['x-superagent-client'] ?? '');
+  try {
+    return decodeURIComponent(raw).replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 300) || null;
+  } catch {
+    return null;
+  }
+};
 
 /** Router commands from a session that does not hold the lease get 409 with the reason. */
 async function asRouter<T>(fn: () => T | Promise<T>): Promise<T> {

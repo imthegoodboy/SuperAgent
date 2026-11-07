@@ -758,8 +758,9 @@ function parseCli(argv: string[]) {
     strict: true,
     options: CLI_OPTIONS,
   });
-  const positionals = parsed.positionals.map((p) => (p.startsWith('\u0000') ? text[Number(p.slice(1))] : p));
-  return { values: parsed.values as Record<string, any>, positionals };
+  const restore = (p: unknown) => (typeof p === 'string' && p.startsWith('\u0000') ? text[Number(p.slice(1))] : p);
+  const values = Object.fromEntries(Object.entries(parsed.values).map(([k, val]) => [k, restore(val)]));
+  return { values: values as Record<string, any>, positionals: parsed.positionals.map((p) => restore(p) as string) };
 }
 
 const CLI_OPTIONS = {
@@ -951,6 +952,7 @@ export async function main(argv: string[]): Promise<void> {
       case 'cleanup': {
         await ensureRunning();
         const days = v.days === undefined ? 7 : Number(v.days);
+        if (!Number.isFinite(days) || days < 0) die('Usage: superagent cleanup [--days N] (N is 0 or more)');
         const r = await api('POST', '/api/workers/cleanup', { days });
         return out(r, () => console.log(r.archived.length ? `${green('✓')} Archived ${r.archived.join(', ')} (finished more than ${days} days ago; branches and PRs stay)` : dim(`Nothing to clean up: no finished worker is older than ${days} days.`)));
       }

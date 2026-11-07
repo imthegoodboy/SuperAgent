@@ -390,7 +390,21 @@ test('--base starts a worker from another branch', async () => {
     const x = await worker(wrong.worker);
     return x.status === 'failed' ? x : null;
   });
-  assert.match(failed.error, /base "no-such-branch" is not a branch or commit/);
+  assert.match(failed.error, /base "no-such-branch" is not a branch in based/);
+});
+
+test('review fixes: --base needs a repo, unicode folders, option values that start with "-"', async () => {
+  await call('POST', '/api/router/attach', { take: true });
+  const before = (await call('GET', '/api/workers')).length;
+  assert.match((await act({ type: 'dispatch', task: 'x', base: 'feature' })).error, /--base needs a repository/);
+  assert.equal((await call('GET', '/api/workers')).length, before, 'no worker was created');
+  const hindi = path.join(home, 'परियोजना');
+  fs.mkdirSync(hindi);
+  const r = spawnSync(process.execPath, [cli, 'workers'], { env, cwd: hindi, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(sa(['router', 'attach', '--take']).status, 0);
+  const t = sa(['dispatch', 'a task', '--title', '-- minus sign first', '--json']);
+  assert.equal(JSON.parse(t.stdout).title, '-- minus sign first');
 });
 
 test('cleanup archives finished workers', async () => {

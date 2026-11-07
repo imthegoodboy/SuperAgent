@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'superagent-report-'));
 process.env.SUPERAGENT_HOME = path.join(tmp, 'data'); // before the modules read it
+after(() => fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5 }));
 
 const { applyConfigPatch, defaultConfig, unknownKeys } = await import('../dist/core/config.js');
 const { telegramSender } = await import('../dist/channels/telegram.js');
@@ -29,6 +30,9 @@ test('B5: config changes are validated, not guessed', () => {
   assert.equal(applyConfigPatch(cfg, { workers: { maxConcurrent: 4 } }).workers.maxConcurrent, 4);
   assert.equal(applyConfigPatch(cfg, { agents: { codex: { model: 'o4' } } }).agents.codex.model, 'o4');
   assert.deepEqual(unknownKeys({ agents: { nope: { model: 'x' } } }), ['agents.nope.model']);
+  assert.throws(() => applyConfigPatch(cfg, { repos: [null] }), /list of repositories/);
+  assert.throws(() => applyConfigPatch(cfg, { telegram: { chats: [null] } }), /telegram.chats must be a list/);
+  assert.throws(() => applyConfigPatch(cfg, { workers: { defaultAgent: 'mock' } }), /must be one of claude, codex, opencode, cursor/, 'mock is for tests only');
 });
 
 test('B8: Telegram trusts the username or numeric id, never the display name', () => {
@@ -82,10 +86,10 @@ test('4c: a character split across two output chunks stays whole', async () => {
 
 test('4c: a run ends when its process exits, even if a child still holds the output pipe', async () => {
   // Like a dev server left running: the child outlives its parent and keeps the inherited output pipe.
-  const script = "require('child_process').spawn(process.execPath,['-e','setTimeout(()=>{},20000)'],{stdio:'inherit'}).unref();console.log('bye')";
+  const script = "require('child_process').spawn(process.execPath,['-e','setTimeout(()=>{},8000)'],{stdio:'inherit'}).unref();console.log('bye')";
   const started = Date.now();
   const h = startProcess({ file: process.execPath, prefix: [], via: 'exe', path: process.execPath }, { cwd: tmp, args: ['-e', script] });
   const r = await h.done;
   assert.equal(r.code, 0);
-  assert.ok(Date.now() - started < 15_000, `took ${Date.now() - started} ms`);
+  assert.ok(Date.now() - started < 7_500, `took ${Date.now() - started} ms`);
 });

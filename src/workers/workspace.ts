@@ -74,10 +74,12 @@ export async function prepareWorkspace(w: WorkerRow, repo: RepoConfig | undefine
   // A base the router asked for (dispatch --base): a branch of the person's own, for example.
   if (w.base) {
     const wanted = w.base;
-    const ok = async (ref: string) => (await run('git', ['-C', checkout, 'rev-parse', '--verify', '--quiet', `${ref}^{commit}`])).code === 0;
-    if (await ok(wanted)) base = wanted;
-    else if (hasOrigin && (await ok(`origin/${wanted}`))) base = `origin/${wanted}`;
-    else throw new Error(`base "${wanted}" is not a branch or commit in ${repo.name}`);
+    // A branch, local or on origin: the worker's PR goes against it, and a PR needs a branch.
+    const ok = async (ref: string) => (await run('git', ['-C', checkout, 'rev-parse', '--verify', '--quiet', ref])).code === 0;
+    if (wanted.startsWith('origin/') && (await ok(`refs/remotes/${wanted}`))) base = wanted;
+    else if (await ok(`refs/heads/${wanted}`)) base = wanted;
+    else if (hasOrigin && (await ok(`refs/remotes/origin/${wanted}`))) base = `origin/${wanted}`;
+    else throw new Error(`base "${wanted}" is not a branch in ${repo.name}`);
   }
 
   const branch = `superagent/w${w.id}-${slugify(w.title, 32)}`;

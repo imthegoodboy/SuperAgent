@@ -101,6 +101,10 @@ export interface ProcOptions {
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
   onLine?: (line: string, stream: 'stdout' | 'stderr') => void;
+  /** Called for every chunk of output, even one without a newline yet (a sign of life). */
+  onChunk?: () => void;
+  /** How much of stdout/stderr to keep for the result (default 256 KB). */
+  keepBytes?: number;
 }
 
 export interface ProcHandle {
@@ -144,10 +148,12 @@ export function startProcess(resolved: Resolved, opts: ProcOptions): ProcHandle 
   // One decoder per stream: a character split across two chunks (emoji, Hindi, …) stays whole.
   const decoders = { stdout: new StringDecoder('utf8'), stderr: new StringDecoder('utf8') };
 
+  const keep = opts.keepBytes ?? KEEP;
   const feed = (stream: 'stdout' | 'stderr', chunk: Buffer) => {
+    opts.onChunk?.();
     const s = decoders[stream].write(chunk);
-    if (stream === 'stdout') stdout = (stdout + s).slice(-KEEP);
-    else stderr = (stderr + s).slice(-KEEP);
+    if (stream === 'stdout') stdout = (stdout + s).slice(-keep);
+    else stderr = (stderr + s).slice(-keep);
     bufs[stream] += s;
     let idx: number;
     while ((idx = bufs[stream].indexOf('\n')) !== -1) {
@@ -221,6 +227,16 @@ export function killTree(pid: number | undefined | null): void {
   }
 }
 
+/** When a process started (ms), or null if it can't be read: a recycled pid starts at another time. */
+export async function processStartTime(pid: number): Promise<number | null> {
+  const r =
+    process.platform === 'win32'
+      ? await run('powershell', ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${Math.trunc(pid)}).StartTime.ToUniversalTime().ToString('o')`], { timeoutMs: 20_000 })
+      : await run('ps', ['-o', 'lstart=', '-p', String(Math.trunc(pid))], { timeoutMs: 10_000 });
+  const t = r.code === 0 ? Date.parse(r.stdout.trim()) : NaN;
+  return Number.isFinite(t) ? t : null;
+}
+
 /** The command line of a running process ('' if it can't be read), to check a pid is still ours. */
 export async function commandLine(pid: number): Promise<string> {
   const r =
@@ -244,7 +260,7 @@ export function isAlive(pid: number | null | undefined): boolean {
 export async function run(
   name: string,
   args: string[],
-  opts: { cwd?: string; stdin?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv } = {},
+  opts: { cwd?: string; stdin?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv; keepBytes?: number } = {},
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   const resolved = resolveCommand(name);
   if (!resolved) return { code: 127, stdout: '', stderr: `${name}: command not found` };
@@ -254,6 +270,7 @@ export async function run(
     stdin: opts.stdin,
     env: opts.env,
     timeoutMs: opts.timeoutMs ?? 60_000,
+    keepBytes: opts.keepBytes,
   });
   const r = await h.done;
   if (r.spawnError) return { code: 127, stdout: r.stdout, stderr: r.spawnError };

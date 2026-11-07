@@ -4,7 +4,7 @@ import type { AgentId } from '../core/config.js';
 import type { WorkerRow, WorkerStatus } from '../core/store.js';
 import { emit, log, ref, snippet, tail } from '../core/util.js';
 import { adapterFor, type AgentEvent } from '../agents/adapters.js';
-import { isAlive, killTree } from '../agents/process.js';
+import { isAlive, killTree, processStartTime } from '../agents/process.js';
 import { startWorkerRun } from '../agents/runner.js';
 import { findPrUrl, firstPrompt, followupPrompt, parseReport, workerSystem } from './prompts.js';
 import { prepareWorkspace, removeWorkspace, syncBranch, type Workspace } from './workspace.js';
@@ -152,6 +152,7 @@ export class WorkerManager {
     if (this.active.has(id) || ['queued', 'running'].includes(w.status)) this.stop(id, 'archived');
     // On Windows a process that still has files open makes the delete fail halfway (EBUSY).
     for (let i = 0; i < 50 && this.active.has(id); i++) await new Promise((r) => setTimeout(r, 200));
+    if (this.active.has(id)) throw new Error(`${ref.W(id)} is still stopping; archive it again in a moment`);
     await removeWorkspace(w);
     this.app.store.unsubscribeAll(id);
     this.app.store.updateWorker(id, { archived: 1 });
@@ -162,8 +163,8 @@ export class WorkerManager {
   async cleanup(days: number): Promise<number[]> {
     const before = Date.now() - days * 86_400_000;
     const old = this.app.store
-      .listWorkers('current', 10_000)
-      .filter((w) => ['done', 'failed', 'stopped'].includes(w.status) && w.updated_at < before && !this.active.has(w.id));
+      .all<WorkerRow>("SELECT * FROM workers WHERE archived = 0 AND status IN ('done', 'failed', 'stopped') AND updated_at < ? ORDER BY id", before)
+      .filter((w) => !this.active.has(w.id));
     for (const w of old) await this.archive(w.id);
     return old.map((w) => w.id);
   }
@@ -404,12 +405,22 @@ export class WorkerManager {
   }
 
   /** After a crash or reboot: runs that were in flight resume from their saved agent session. */
-  recover(): void {
+  async recover(): Promise<void> {
     const { store } = this.app;
+    const interrupted = store.all<{ worker_id: number; started_at: number }>("SELECT worker_id, started_at FROM worker_runs WHERE status = 'running'");
     store.run("UPDATE worker_runs SET status = 'interrupted', ended_at = ? WHERE status = 'running'", Date.now());
     for (const w of store.workersWithStatus('running')) {
-      // Still alive from before the crash: it can't be re-attached, and two runs must never share a workspace.
-      if (w.pid && isAlive(w.pid)) killTree(w.pid);
+      // Still alive from before the crash: it can't be re-attached, and two runs must never share a
+      // workspace. Only end it if that pid really is this run (a recycled pid started at another time),
+      // and wait until it is gone.
+      const runStart = interrupted.find((r) => r.worker_id === w.id)?.started_at;
+      if (w.pid && runStart && isAlive(w.pid)) {
+        const started = await processStartTime(w.pid);
+        if (started !== null && Math.abs(started - runStart) < 30_000) {
+          killTree(w.pid);
+          for (let i = 0; i < 50 && isAlive(w.pid); i++) await new Promise((r) => setTimeout(r, 200));
+        }
+      }
       store.addInbox(
         w.id,
         'system',
