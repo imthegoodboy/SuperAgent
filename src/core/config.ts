@@ -65,7 +65,8 @@ export const DEFAULT_POLICIES = `- In monitored GitHub repos, if someone reports
 export function defaultConfig(): Config {
   return {
     port: 7878,
-    mention: '@superagent',
+    // "@superagent" would ping a real GitHub user of that name; a slash command doesn't.
+    mention: '/superagent',
     router: { agent: 'claude', model: 'haiku', maxBatch: 20, rotateAfterTurns: 60 },
     workers: {
       defaultAgent: 'claude',

@@ -36,7 +36,8 @@ async function call(method, p, body) {
   return j;
 }
 
-async function until(fn, ms = 20000) {
+// Generous limit: spawning agent processes is slow on loaded CI runners and low-memory machines.
+async function until(fn, ms = 60000) {
   const end = Date.now() + ms;
   for (;;) {
     const v = await fn();

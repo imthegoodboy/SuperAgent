@@ -63,7 +63,14 @@ route('POST', '/api/messages', ({ app, body }) => {
   return app.sendLocal(text);
 });
 
-route('GET', '/api/workers', ({ app, query }) => app.store.listWorkers(query.get('archived') === '1'));
+route('GET', '/api/workers', ({ app, query }) =>
+  app.store.listWorkers(query.get('archived') === '1').map((w) =>
+    // Active workers carry their recent event kinds so the UI can draw activity tracks right away.
+    ['queued', 'running', 'waiting'].includes(w.status)
+      ? { ...w, ticks: app.store.tailLogs(w.id, 48).map((l) => l.kind) }
+      : w,
+  ),
+);
 route('POST', '/api/workers', ({ app, body }) => {
   const task = String(body?.task ?? '').trim();
   if (!task) throw new HttpError(400, 'task is required');

@@ -41,7 +41,7 @@ function renderFoot() {
   const waiting = activeWorkers().filter((w) => w.status === 'waiting').length;
   clear(
     foot,
-    h('div', { class: `conn ${state.connected ? 'on' : 'off'}` }, h('span', { class: 'dot' }), state.connected ? 'Running on this computer' : 'Reconnecting…'),
+    h('div', { class: `conn ${state.connected ? 'on' : 'off'}` }, h('span', { class: 'dot' }), state.connected ? 'Running locally' : 'Reconnecting…'),
     state.connected && r
       ? h('div', { class: 'foot-line' }, icon('router', 14), r.busy ? 'Router is thinking' : r.lastError ? 'Router hit an error' : 'Router is idle')
       : null,

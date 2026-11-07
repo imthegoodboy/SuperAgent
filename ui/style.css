@@ -61,6 +61,11 @@
   box-sizing: border-box;
 }
 
+/* Component display rules must never un-hide an element. */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   height: 100%;
@@ -789,7 +794,7 @@ a.msg-event:hover {
   text-decoration: none;
 }
 .lane + .lane {
-  border-top: 1px solid var(--line);
+  margin-top: 4px;
 }
 .lane-top {
   display: flex;

@@ -2,8 +2,8 @@ import { AGENTS, api, clear, h, icon, toast } from '../lib.js';
 import { state } from '../state.js';
 
 const MODES = [
-  ['mentions', 'Only when mentioned'],
-  ['all', 'Watch everything'],
+  ['mentions', 'Mentions only'],
+  ['all', 'Everything'],
   ['off', 'Off'],
 ];
 

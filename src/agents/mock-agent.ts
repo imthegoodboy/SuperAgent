@@ -74,8 +74,11 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Activity first, then stay busy for `delay` ms, so a running mock worker looks like a real one.
   const title = input.match(/^# SuperAgent task W#\d+: (.*)$/m)?.[1] ?? input.split('\n')[0].slice(0, 60);
   out({ type: 'assistant', message: { content: [{ type: 'text', text: `Working on: ${title}` }] } });
+  out({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'git status --short' } }] } });
+  out({ type: 'user', message: { content: [{ type: 'tool_result', content: 'clean' }] } });
   out({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Write', input: { file_path: 'mock-output.txt' } }] } });
   fs.writeFileSync('mock-output.txt', `mock agent was here\n${title}\n`);
   out({ type: 'user', message: { content: [{ type: 'tool_result', content: 'File written' }] } });

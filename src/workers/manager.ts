@@ -69,7 +69,7 @@ export class WorkerManager {
     if (origin?.thread_id) threads.add(origin.thread_id);
     for (const th of threads) if (store.threadById(th)?.subscribable) store.subscribe(w.id, th);
     log(`worker ${ref.W(w.id)} created (${spec.agent}): ${w.title}`);
-    if (!spec.silent) this.announce(w, `Started ${ref.W(w.id)} · ${w.title}`, 'started');
+    if (!spec.silent) this.announce(w, `Started ${ref.W(w.id)}: ${w.title}`, 'started');
     this.changed(w.id);
     this.schedule();
     return store.workerById(w.id)!;
@@ -105,7 +105,7 @@ export class WorkerManager {
       a.ending = 'stopped';
       a.kill();
     }
-    this.announce(w, `Stopped ${ref.W(id)} · ${reason}`, 'stopped');
+    this.announce(w, `Stopped ${ref.W(id)}: ${reason}`, 'stopped');
     this.changed(id);
   }
 
@@ -308,8 +308,9 @@ export class WorkerManager {
     const endLog = store.addLog(id, runId, status === 'failed' ? 'error' : 'system', `Run finished: ${status}${error ? ` · ${snippet(error, 300)}` : ''}`);
     emit('worker_log', endLog);
     this.report(id, report?.status ?? (error ? 'failed' : 'done'), summary, pr, report?.question ?? null, error);
-    const verb = status === 'done' ? 'Finished' : status === 'waiting' ? 'Needs input' : 'Failed';
-    if (!w.silent || status === 'done') this.announce(w, `${verb} ${ref.W(id)} · ${w.title}`, status);
+    const line =
+      status === 'waiting' ? `${ref.W(id)} needs your input: ${w.title}` : `${status === 'done' ? 'Finished' : 'Failed'} ${ref.W(id)}: ${w.title}`;
+    if (!w.silent || status === 'done') this.announce(w, line, status);
     this.changed(id);
   }
 

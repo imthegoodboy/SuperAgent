@@ -52,7 +52,7 @@ export default function tasksView(el, arg) {
       'a',
       { class: `task-row${w.id === selected ? ' selected' : ''}`, href: `#/tasks/${w.id}` },
       h('div', { class: 'row-top' }, agentDot(w.agent), h('span', { class: 'row-title' }, w.title)),
-      h('div', { class: 'row-meta' }, pill(w.status), h('span', {}, `W${w.id}`), w.repo ? h('span', {}, w.repo) : null, h('span', {}, ago(w.created_at))),
+      h('div', { class: 'row-meta' }, pill(w.status), h('span', {}, `W#${w.id}`), w.repo ? h('span', {}, w.repo) : null, h('span', {}, ago(w.created_at))),
       w.status === 'running' ? track(w.id, true) : null,
     );
   }
@@ -130,7 +130,7 @@ export default function tasksView(el, arg) {
         'div',
         { class: 'detail-meta' },
         pill(w.status),
-        h('span', {}, `W${w.id}`),
+        h('span', {}, `W#${w.id}`),
         h('span', {}, AGENTS[w.agent] ?? w.agent),
         w.repo ? h('span', {}, w.repo) : h('span', { class: 'muted' }, 'Scratch folder'),
         w.branch ? h('code', {}, w.branch) : null,
@@ -157,7 +157,7 @@ export default function tasksView(el, arg) {
     if (selected !== id) return;
     logEl = h('div', { class: 'log', role: 'log' }, d.logs.map(logRow));
     lastLogId = d.logs.at(-1)?.id ?? 0;
-    const msgInput = h('input', { class: 'input', placeholder: `Send W${id} a message, e.g. "also update the docs"`, 'aria-label': 'Message this worker' });
+    const msgInput = h('input', { class: 'input', placeholder: `Send W#${id} a message, e.g. "also update the docs"`, 'aria-label': 'Message this worker' });
     const msgForm = h(
       'form',
       {

@@ -1,4 +1,4 @@
-import { api, listen, pushTick, refreshTracks } from './lib.js';
+import { api, listen, pushTick, refreshTracks, seedTicks } from './lib.js';
 
 /** Shared client state, kept current by the daemon's live event stream. */
 export const state = {
@@ -13,6 +13,7 @@ export const state = {
 export async function loadAll() {
   const [workers, config, agents] = await Promise.all([api('GET', '/api/workers'), api('GET', '/api/config'), api('GET', '/api/agents')]);
   state.workers = new Map(workers.map((w) => [w.id, w]));
+  for (const w of workers) if (w.ticks) seedTicks(w.id, w.ticks);
   state.config = config;
   state.agents = agents;
 }

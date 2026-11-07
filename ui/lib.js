@@ -210,6 +210,9 @@ const tracks = new Map();
 export function trackTicks(workerId) {
   return tracks.get(workerId) ?? [];
 }
+export function seedTicks(workerId, kinds) {
+  tracks.set(workerId, kinds.slice(-48));
+}
 export function pushTick(workerId, kind) {
   const list = tracks.get(workerId) ?? [];
   list.push(kind);

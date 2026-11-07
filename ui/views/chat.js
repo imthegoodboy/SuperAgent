@@ -13,7 +13,7 @@ export default function chatView(el) {
   const thinking = h('div', { class: 'thinking', hidden: true }, h('span', { class: 'dots' }, h('i'), h('i'), h('i')), 'Thinking');
   const input = h('textarea', {
     rows: 1,
-    placeholder: 'Ask SuperAgent to build, fix or check something',
+    placeholder: 'Message SuperAgent',
     'aria-label': 'Message SuperAgent',
   });
   const send = h('button', { class: 'send', type: 'submit', title: 'Send (Enter)', 'aria-label': 'Send' }, icon('send', 18));
@@ -97,7 +97,7 @@ export default function chatView(el) {
           'a',
           { class: `lane st-${w.status}`, href: `#/tasks/${w.id}` },
           h('div', { class: 'lane-top' }, agentDot(w.agent), h('span', { class: 'lane-title' }, w.title)),
-          h('div', { class: 'lane-meta' }, `W${w.id}`, h('span', {}, LANE_STATUS[w.status] ?? w.status)),
+          h('div', { class: 'lane-meta' }, `W#${w.id}`, h('span', {}, LANE_STATUS[w.status] ?? w.status)),
           track(w.id, w.status === 'running'),
         ),
       ),
