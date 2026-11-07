@@ -71,7 +71,17 @@ test('windows cmd shim resolution', () => {
   const exe = parseCmdShim('"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"   %*', 'C:\\npm\\claude.cmd');
   assert.equal(exe.via, 'exe');
   assert.match(exe.file, /claude\.exe$/);
-  const js = parseCmdShim('"%_prog%"  "%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js" %*', 'C:\\npm\\codex.cmd');
+  // Real npm shim: mentions %dp0%\node.exe as the interpreter before the script.
+  const codexShim = [
+    '@ECHO off',
+    'IF EXIST "%dp0%\\node.exe" (',
+    '  SET "_prog=%dp0%\\node.exe"',
+    ') ELSE (',
+    '  SET "_prog=node"',
+    ')',
+    'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js" %*',
+  ].join('\r\n');
+  const js = parseCmdShim(codexShim, 'C:\\npm\\codex.cmd');
   assert.equal(js.via, 'node');
   assert.match(js.prefix[0], /codex\.js$/);
   const ps = parseCmdShim('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\\cursor-agent.ps1" %*', 'C:\\x\\cursor-agent.cmd');

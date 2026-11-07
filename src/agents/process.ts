@@ -41,10 +41,11 @@ export function which(name: string): string | null {
  */
 export function parseCmdShim(content: string, shimPath: string): Resolved | null {
   const dir = path.dirname(shimPath);
-  let m = content.match(/"%dp0%\\([^"]+?\.exe)"/i);
-  if (m) return { file: path.join(dir, m[1]), prefix: [], via: 'exe', path: shimPath };
-  m = content.match(/"%dp0%\\([^"]+?\.(?:js|cjs|mjs))"/i);
+  // JS entry first: npm shims for node CLIs also mention "%dp0%\node.exe" as the interpreter.
+  let m = content.match(/"%dp0%\\([^"]+?\.(?:js|cjs|mjs))"/i);
   if (m) return { file: process.execPath, prefix: [path.join(dir, m[1])], via: 'node', path: shimPath };
+  const exe = [...content.matchAll(/"%dp0%\\([^"]+?\.exe)"/gi)].map((x) => x[1]).find((p) => !/(^|\\)node\.exe$/i.test(p));
+  if (exe) return { file: path.join(dir, exe), prefix: [], via: 'exe', path: shimPath };
   m = content.match(/-File\s+"%SCRIPT_DIR%\\([^"]+?\.ps1)"/i);
   if (m) {
     const ps = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
