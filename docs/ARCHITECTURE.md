@@ -175,8 +175,8 @@ SuperAgent has no UI of its own. Agents use it through:
 - **The local API** (`src/daemon/server.ts`): a JSON API and a Server-Sent Events stream (`/api/events`)
   on `127.0.0.1` only. Every route except `/api/health` needs the token from `~/.superagent/token`.
   Requests with a foreign `Host` (DNS rebinding) or `Origin` (cross-site) are rejected. The router's
-  routes are `router/attach`, `router/detach`, `router/events?wait=`, `router/actions`, `recall` and
-  `graph`.
+  routes are `router/attach`, `router/detach`, `router/events?wait=`, `router/actions`, `router/peek`
+  (used by the Claude Code hook), `recall` and `graph`.
 
 Workers run with `SUPERAGENT_WORKER=W#n` in their environment, and the router commands refuse to run
 there, so a worker that loads the skill can't act as the router or start more workers.

@@ -15,8 +15,8 @@
 Install SuperAgent once, then tell Claude Code, Codex, OpenCode or Cursor to *"use superagent"*. Your agent
 becomes a manager of other coding agents:
 
-- **It hands out work.** Each task goes to its own worker (Claude Code, Codex, OpenCode or Cursor), in its
-  own git branch, with several running at the same time.
+- **It hands out work.** Each task goes to its own worker (Claude Code, Codex, OpenCode or Cursor), on its
+  own git branch (or in a scratch folder when no repository is involved), with several running at once.
 - **It keeps talking to you while they work.** Results come back as they finish.
 - **It watches GitHub for you.** It reacts to issues, review comments and failing CI, and follows up on the
   pull requests its workers open.
@@ -75,11 +75,12 @@ More things to ask:
 
 ### Even better in Claude Code
 
-- **Results show up by themselves.** Once a Claude Code session has used SuperAgent, finished work,
-  questions from workers, and new GitHub comments appear on your next message, with no need to ask.
+- **Results show up by themselves.** In the Claude Code session that is managing your work, finished
+  work, questions from workers and new GitHub comments appear on your next message, with no need to ask.
+  This needs a Claude Code version with skill hooks (2.1 or newer).
 - **A dedicated manager session.** Run `superagent claude` (optionally with a first request) to open Claude
-  Code as the manager. It has no file-editing tools, so it hands every task to a worker instead of doing
-  it itself.
+  Code as the manager. Its file-editing tools are switched off and MCP servers aren't loaded, so it hands
+  every task to a worker instead of doing it itself.
 
   ```sh
   superagent claude "fix the flaky login test and update the changelog"
@@ -91,7 +92,7 @@ More things to ask:
 |---|---|
 | **Parallel work** | Several tasks at once, each in its own worktree and branch, never touching your checkout. |
 | **Any agent, mixed** | Pick the agent per task ("use Codex for this") or let SuperAgent choose. |
-| **Pull requests** | In GitHub repos, workers push their branch and open a **draft** PR when done. |
+| **Pull requests** | In GitHub repos, workers push their branch and open a **draft** PR when done (unless you turn that off). |
 | **Follow-ups** | Review comments and failing CI on a worker's PR go straight back to that worker. |
 | **GitHub on autopilot** | Write `/superagent` in an issue or comment to call it, or let it watch a repo. |
 | **Background** | Close the terminal and it keeps handling GitHub and Telegram. Next time you get a "while you were away" summary. |
@@ -103,7 +104,8 @@ More things to ask:
 Most things work without setup. These commands are for when you want more. Your agent can run them
 for you too.
 
-**Repositories.** A task in the folder you're in just works (`--repo .`). To add others or watch GitHub:
+**Repositories.** Tasks for the folder you're in, or for any `owner/repo`, just work: the repository is
+added the first time. To set one up yourself, or to watch GitHub:
 
 ```sh
 superagent repo add .                          # this project
@@ -158,15 +160,17 @@ Every command accepts `--json`.
 
 ## Safety
 
-- **Everything stays on your computer.** No accounts and no servers. The service only listens on
-  `127.0.0.1` and needs a local key.
+- **It runs on your computer.** No accounts and no servers of ours. The service only listens on
+  `127.0.0.1` and needs a local key. GitHub and Telegram features talk to those services with your own
+  logins, and your coding agents use their usual providers.
 - **Your checkout is never touched.** Workers get their own worktrees under `~/.superagent/worktrees`.
-  They push only their own `superagent/...` branch, open **draft** PRs, and never merge or push to your main
-  branch. Review their PRs as you would anyone's.
+  They push only their own `superagent/...` branch, open **draft** PRs (by default), and never merge or push
+  to your main branch. Review their PRs as you would anyone's.
 - **Full autonomy is the default:** workers run commands without asking. For each agent's own sandbox
   and approvals, run `superagent config set workers.autonomy safe`.
-- **Only you can trigger it on GitHub**, unless you add people with `--allow`. Text from GitHub and
-  Telegram is treated as untrusted data.
+- **Only you can trigger it on GitHub**, unless you add people with `--allow`. If SuperAgent can't tell who
+  you are (`gh` signed out), GitHub events stay off for that repo. Text from GitHub and Telegram is
+  treated as untrusted data.
 - SuperAgent never sees your agent logins; each agent uses its own.
 
 ## Troubleshooting

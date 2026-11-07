@@ -266,7 +266,14 @@ async function repoArg(value: string | undefined): Promise<string | undefined> {
   const v = value.toLowerCase();
   if (cfg.repos.some((r) => r.name.toLowerCase() === v || r.slug?.toLowerCase() === v)) return value;
   const dir = path.resolve(value);
-  if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return value; // the router reports it as unknown
+  const isFolder = fs.existsSync(dir) && fs.statSync(dir).isDirectory();
+  if (!isFolder && /^[\w.-]+\/[\w.-]+$/.test(value)) {
+    // A GitHub repo that isn't configured yet: add it (it is cloned when the worker starts).
+    const added = await api('POST', '/api/repos', { input: value });
+    console.error(dim(`Added repository ${added.name} (${added.slug}).`));
+    return added.name;
+  }
+  if (!isFolder) return value; // the router reports it as unknown
   const known = await repoForFolder(cfg.repos as never, dir);
   if (known) return known.name;
   const added = await api('POST', '/api/repos', { input: dir });
@@ -410,10 +417,27 @@ async function diff(idArg: string | undefined, patch: boolean): Promise<void> {
       for (const f of files) console.log(`  ${f}`);
     });
   }
-  const git = async (...a: string[]) => (await run('git', ['-C', w.cwd, ...a], { timeoutMs: 60_000 })).stdout.trimEnd();
+  let cut = false;
+  const git = async (...a: string[]) => {
+    const r = await run('git', ['-C', w.cwd, ...a], { timeoutMs: 60_000 });
+    if (r.code !== 0) throw new Error(`git ${a[0]} failed in ${w.cwd}: ${(r.stderr || r.stdout).trim().slice(0, 300)}`);
+    if (r.stdout.length >= 256 * 1024 - 1) cut = true; // run() keeps the last 256 KB
+    return r.stdout.trimEnd();
+  };
   const range = `${w.base}...HEAD`;
   const [commits, stat, status] = await Promise.all([git('log', '--oneline', `${w.base}..HEAD`), git('diff', '--stat', range), git('status', '--short')]);
-  const text = patch ? [await git('diff', range), await git('diff')].filter(Boolean).join('\n') : '';
+  let text = '';
+  if (patch) {
+    const parts = [await git('diff', range), await git('diff', 'HEAD')]; // committed, then staged + unstaged
+    // New files git doesn't track yet: show small ones in full.
+    for (const f of (await git('ls-files', '--others', '--exclude-standard')).split('\n').filter(Boolean)) {
+      const file = path.join(w.cwd, f);
+      const size = fs.statSync(file).size;
+      parts.push(size <= 64 * 1024 ? `--- new file: ${f}\n${fs.readFileSync(file, 'utf8')}` : `--- new file: ${f} (${size} bytes, not shown)`);
+    }
+    text = parts.filter(Boolean).join('\n');
+    if (cut) text = `(This patch is longer than 256 KB and its start is cut off; open ${w.cwd} to see all of it.)\n${text}`;
+  }
   out({ worker: id, branch: w.branch, base: w.base, folder: w.cwd, pr: w.pr_url, commits: commits.split('\n').filter(Boolean), stat, uncommitted: status, patch: patch ? text : undefined }, () => {
     console.log(`${bold(id)} on ${cyan(w.branch)} (from ${w.base})${w.pr_url ? ` · PR ${blue(w.pr_url)}` : ''}`);
     console.log(dim(`  ${w.cwd}`));
@@ -619,8 +643,11 @@ export function claudeRouterArgs(request: string): string[] {
   return [
     // Only the shell (for the superagent CLI) and skills: no editing tools, so it can't drift into
     // doing the work itself. That was the main failure of single sessions in the article's experiment.
+    // Deny rules win over allow rules in the user's own settings, and no MCP server can add tools back.
     '--tools', 'Bash,Skill',
-    '--allowedTools', 'Bash(superagent *),Bash(superagent)',
+    '--disallowedTools', 'Edit', 'Write', 'NotebookEdit',
+    '--strict-mcp-config',
+    '--allowedTools', 'Bash(superagent *)', 'Bash(superagent)',
     '--append-system-prompt', ROUTER_ROLE,
     first,
   ];
@@ -630,6 +657,9 @@ export function claudeRouterArgs(request: string): string[] {
 async function launchClaude(request: string): Promise<void> {
   const resolved = resolveCommand('claude');
   if (!resolved) die('Claude Code is not installed (`claude` was not found on PATH).');
+  // A wrapper we can't see through would run the request through cmd.exe or PowerShell, which rewrite
+  // characters such as % and $ in it.
+  if (resolved.via === 'cmd' || resolved.via === 'powershell') die(`Can't start Claude Code safely through ${resolved.path}; run \`claude\` yourself and say "use superagent".`);
   await ensureRunning();
   const code = await runInteractive(resolved, claudeRouterArgs(request), process.cwd());
   if (code) process.exitCode = code;
@@ -657,25 +687,30 @@ async function hook(): Promise<void> {
       /* not JSON: use the environment */
     }
   }
-  const session = String(input.session_id || sessionId());
-  if (!session) return;
-  try {
-    const res = await fetch(`${baseUrl()}/api/router/peek`, {
-      headers: { authorization: `Bearer ${token()}`, 'x-superagent-session': session },
-      signal: AbortSignal.timeout(1500),
-    });
-    if (!res.ok) return;
-    const r = (await res.json()) as { attached: boolean; pending: string[]; away_pending: boolean };
-    if (!r.attached || (!r.pending.length && !r.away_pending)) return;
-    const n = r.pending.length;
+  // SUPERAGENT_SESSION, when set, is also what the router commands send (see sessionId()).
+  const session = String(process.env.SUPERAGENT_SESSION || input.session_id || sessionId());
+  let r: { attached: boolean; pending: string[]; away_pending: boolean } = { attached: false, pending: [], away_pending: false };
+  if (session) {
+    try {
+      const res = await fetch(`${baseUrl()}/api/router/peek`, {
+        headers: { authorization: `Bearer ${token()}`, 'x-superagent-session': session },
+        signal: AbortSignal.timeout(1500),
+      });
+      if (res.ok) r = (await res.json()) as typeof r;
+    } catch {
+      /* service not running or slow: say nothing */
+    }
+  }
+  const n = r.pending.length;
+  let notice: string | null = null;
+  if (r.attached && (n || r.away_pending)) {
     const head = n ? `${n} event${n === 1 ? ' is' : 's are'} waiting` : 'things happened while no agent was the router';
     const lines = [`[SuperAgent] You are the router and ${head}. Run \`superagent events\` and handle ${n === 1 ? 'it' : 'them'} along with this message.`];
     for (const p of r.pending.slice(0, 8)) lines.push(`- ${p}`);
     if (n > 8) lines.push(`- … and ${n - 8} more`);
-    console.log(lines.join('\n'));
-  } catch {
-    /* service not running or slow: say nothing */
+    notice = lines.join('\n');
   }
+  out({ notice, pending: r.pending, away_pending: r.away_pending }, () => notice && console.log(notice));
 }
 
 async function uninstall(): Promise<void> {

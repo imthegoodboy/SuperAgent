@@ -92,6 +92,47 @@ test('the first command installs the skill for every agent found, and uninstall 
   }
 });
 
+test('upgrading from the shared-folder layout gives OpenCode its own copy', () => {
+  const { home, sa } = fakeHome();
+  try {
+    fs.mkdirSync(path.join(home, '.claude'));
+    fs.mkdirSync(path.join(home, '.config', 'opencode'), { recursive: true });
+    fs.mkdirSync(path.join(home, '.superagent'));
+    // What the previous version recorded: OpenCode "installed" through Claude Code's folder.
+    fs.writeFileSync(path.join(home, '.superagent', 'integrations.json'), JSON.stringify({ hash: 'old', agents: ['claude', 'opencode'] }));
+    assert.equal(sa('config').status, 0);
+    assert.ok(fs.existsSync(skillAt(home, '.config', 'opencode')), 'OpenCode gets its own copy once');
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
+
+test('a GitHub repo added while gh is signed out is not open to everyone', () => {
+  const { home, env } = fakeHome();
+  try {
+    const repo = path.join(home, 'proj');
+    fs.mkdirSync(repo);
+    const git = (...a) => spawnSync('git', ['-C', repo, ...a], { encoding: 'utf8' });
+    git('init', '-q', '-b', 'main');
+    git('remote', 'add', 'origin', 'https://github.com/acme/proj.git');
+    // git must be found, gh must not know who you are.
+    const gitDir = path.dirname(spawnSync(process.platform === 'win32' ? 'where' : 'which', ['git'], { encoding: 'utf8' }).stdout.split(/\r?\n/)[0]);
+    const p = [path.dirname(process.execPath), gitDir].join(path.delimiter);
+    const ghHome = fs.mkdtempSync(path.join(os.tmpdir(), 'superagent-gh-'));
+    const r = spawnSync(process.execPath, [cli, 'repo', 'add', repo], {
+      env: { ...env, PATH: p, Path: p, GH_CONFIG_DIR: ghHome, GH_TOKEN: '', GITHUB_TOKEN: '' },
+      encoding: 'utf8',
+    });
+    fs.rmSync(ghHome, { recursive: true, force: true });
+    assert.equal(r.status, 0, r.stderr);
+    const cfg = JSON.parse(fs.readFileSync(path.join(home, '.superagent', 'config.json'), 'utf8'));
+    assert.equal(cfg.repos[0].slug, 'acme/proj');
+    assert.equal(cfg.repos[0].mode, 'off', 'GitHub events stay off when the allowlist cannot be filled');
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
+
 test('postinstall only installs for global npm installs, and upgrades respect a removed skill', () => {
   const { home, env, sa } = fakeHome();
   try {

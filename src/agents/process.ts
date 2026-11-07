@@ -257,7 +257,10 @@ export function runInteractive(resolved: Resolved, args: string[], cwd: string):
   }
   return new Promise((resolve) => {
     const child = spawn(resolved.file, argv, { cwd, stdio: 'inherit', windowsVerbatimArguments: verbatim });
-    child.on('error', () => resolve(127));
+    child.on('error', (err) => {
+      process.stderr.write(`Could not start ${resolved.path}: ${err.message}\n`);
+      resolve(127);
+    });
     child.on('close', (code) => resolve(code ?? 1));
   });
 }

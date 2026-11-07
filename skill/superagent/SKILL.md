@@ -134,10 +134,13 @@ channel. If the user changes their mind, `tell` or `cancel` the affected workers
 Pick `--agent` only when the user asks for one (or a repo prefers one); otherwise omit it.
 
 Pick `--repo` when the task concerns a repository: a configured name, `owner/repo`, or a folder. For the
-project you and the user are in, use `--repo .`; it is added on first use. Without a repo the worker gets
-an empty scratch folder. A worker starts from the repo's default branch on GitHub (or the current branch
-of a local-only repo), so it does **not** see uncommitted or unpushed changes. If the task depends on
-them, ask the user to commit and push first, or describe them in the task.
+project you and the user are in, use `--repo .`. A folder or `owner/repo` that isn't configured yet is
+added on first use. Without a repo the worker gets an empty scratch folder.
+
+Where a worker starts: in a repo on GitHub, from the freshly fetched default branch, so it does **not** see
+unpushed commits or uncommitted changes. In a local-only repo, from the last commit of the current branch,
+so it does not see uncommitted changes. If the task depends on them, ask the user to commit (and push),
+or describe the changes in the task.
 
 ## Rules
 

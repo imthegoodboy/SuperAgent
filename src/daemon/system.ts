@@ -27,22 +27,25 @@ export function addRepo(
   explicit: { mode?: string; agent?: string; allowUsers?: string[]; name?: string } = {},
 ): { repos: RepoConfig[]; repo: RepoConfig } {
   const same = repos.find((r) => (r.slug && repo.slug && r.slug.toLowerCase() === repo.slug.toLowerCase()) || samePath(r.path, repo.path));
+  const taken = (n: string, except?: RepoConfig) => repos.some((r) => r !== except && r.name.toLowerCase() === n.toLowerCase());
+  const unique = (n: string, except?: RepoConfig) => {
+    let name = n;
+    for (let i = 2; taken(name, except); i++) name = `${n}-${i}`;
+    return name;
+  };
   if (same) {
     const merged = normalizeRepo({
       ...same,
-      slug: same.slug ?? repo.slug,
+      slug: repo.slug ?? same.slug,
       path: repo.path ?? same.path,
-      ...(explicit.name ? { name: explicit.name } : {}),
+      ...(explicit.name ? { name: unique(explicit.name, same) } : {}),
       ...(explicit.mode ? { mode: explicit.mode as SourceMode } : {}),
       ...(explicit.agent ? { agent: explicit.agent as RepoConfig['agent'] } : {}),
       ...(explicit.allowUsers ? { allowUsers: explicit.allowUsers } : {}),
     });
     return { repos: repos.map((r) => (r === same ? merged : r)), repo: merged };
   }
-  let name = repo.name;
-  const taken = (n: string) => repos.some((r) => r.name.toLowerCase() === n.toLowerCase());
-  for (let i = 2; taken(name); i++) name = `${repo.name}-${i}`;
-  const added = { ...repo, name };
+  const added = { ...repo, name: unique(repo.name) };
   return { repos: [...repos, added], repo: added };
 }
 
@@ -75,12 +78,18 @@ export async function resolveRepoInput(
     repo = { slug: view.stdout.trim() || slug };
   }
   let allowUsers = opts.allowUsers;
+  let mode = opts.mode;
   if (!allowUsers && repo.slug) {
     // Safe default: only you can trigger the agent from GitHub. Widen it with `repo add --allow`.
     const me = await run('gh', ['api', 'user', '--jq', '.login'], { timeoutMs: 20_000 });
-    allowUsers = me.code === 0 && me.stdout.trim() ? [me.stdout.trim()] : [];
+    if (me.code === 0 && me.stdout.trim()) allowUsers = [me.stdout.trim()];
+    else {
+      // Unknown login: an empty allowlist would mean "anyone", so GitHub events stay off instead.
+      allowUsers = [];
+      mode = 'off';
+    }
   }
-  return normalizeRepo({ ...repo, name: opts.name, mode: opts.mode, agent: opts.agent as RepoConfig['agent'], allowUsers });
+  return normalizeRepo({ ...repo, name: opts.name, mode, agent: opts.agent as RepoConfig['agent'], allowUsers });
 }
 
 // ---------- agent integrations: the skill, installed for every coding agent here ----------
@@ -203,7 +212,11 @@ interface Stamp {
   autostart?: boolean;
   /** `superagent uninstall` ran: install nothing until `superagent install` or a fresh npm install. */
   uninstalled?: boolean;
+  /** 2: every agent has its own copy (before, OpenCode read Claude Code's). */
+  layout?: number;
 }
+
+const LAYOUT = 2;
 
 function readStamp(): Stamp | null {
   try {
@@ -222,7 +235,7 @@ function writeStamp(st: Stamp): void {
 export function installIntegrations(): Integration[] {
   for (const p of plan()) copySkill(p.target);
   const st = readStamp();
-  writeStamp({ ...st, hash: skillHash(), agents: plan().map((p) => p.target.agent), uninstalled: undefined });
+  writeStamp({ ...st, hash: skillHash(), layout: LAYOUT, agents: plan().map((p) => p.target.agent), uninstalled: undefined });
   return integrationStatus();
 }
 
@@ -244,10 +257,17 @@ export function ensureIntegrations(): void {
   const st = readStamp();
   if (st?.uninstalled) return;
   const hash = skillHash();
-  const todo = plan().filter((p) => !st?.agents.includes(p.target.agent) || (st.hash !== hash && fs.existsSync(path.join(p.dest, 'SKILL.md'))));
-  if (st && st.hash === hash && !todo.length) return;
+  const has = (p: { dest: string }) => fs.existsSync(path.join(p.dest, 'SKILL.md'));
+  const todo = plan().filter(
+    (p) =>
+      !st?.agents.includes(p.target.agent) ||
+      (st.hash !== hash && has(p)) ||
+      // Moving to one copy per agent: OpenCode never had its own folder, so this is not a removal.
+      (st.layout !== LAYOUT && p.target.agent === 'opencode' && !has(p)),
+  );
+  if (st && st.hash === hash && st.layout === LAYOUT && !todo.length) return;
   for (const p of todo) copySkill(p.target);
-  writeStamp({ ...st, hash, agents: [...new Set([...(st?.agents ?? []), ...plan().map((p) => p.target.agent)])] });
+  writeStamp({ ...st, hash, layout: LAYOUT, agents: [...new Set([...(st?.agents ?? []), ...plan().map((p) => p.target.agent)])] });
 }
 
 /** Turn on start-at-login once, the first time SuperAgent starts. Someone who turns it off keeps it off. */
