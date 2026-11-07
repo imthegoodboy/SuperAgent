@@ -14,6 +14,8 @@ import {
   ensureIntegrations,
   installIntegrations,
   integrationStatus,
+  addRepo,
+  repoForFolder,
   resolveRepoInput,
   uninstallIntegrations,
 } from '../daemon/system.js';
@@ -112,7 +114,7 @@ ${bold('Be the router')}
   router status               Who is the router right now, and its recent turns
   events [--wait <seconds>]   New events that need a decision (waits up to 280 s for one with --wait)
   dispatch <task|->           Start a worker and return at once
-                                --agent claude|codex|opencode|cursor  --repo <name>  --title <text>
+                                --agent claude|codex|opencode|cursor  --repo <name|owner/repo|.>  --title <text>
                                 --follow TH#8,TH#9  --reply TH#8  --silent
   tell <W#3> <text|->         New instructions or information for a worker (it resumes with its memory)
   cancel <W#3> [--reason r]   Stop a worker
@@ -125,6 +127,7 @@ ${bold('Be the router')}
 ${bold('Workers')}
   workers [--all]             List workers (alias: ls)
   logs <W#3> [-f]             What a worker did; -f follows live. Without an id: the service log
+  diff <W#3> [--patch]        What a worker changed: commits, files, uncommitted work
   retry <W#3>                 Run a failed or stopped worker again
   archive <W#3>               Remove a finished worker's workspace (its branch and PR stay)
   graph [--mermaid]           Router → workers → threads they follow
@@ -188,8 +191,15 @@ function serviceEnv(): NodeJS.ProcessEnv {
 }
 
 /** Commands that need the service start it on demand, so an agent never has to. */
+let checkedVersion = false;
 async function ensureRunning(): Promise<void> {
-  if (!(await health())) await start(false, true);
+  const h = await health();
+  if (!h) return start(false, true);
+  // After `npm i -g` the old service keeps running until restarted.
+  if (!checkedVersion && h.version !== pkgVersion()) {
+    console.error(yellow(`SuperAgent ${h.version} is running, but ${pkgVersion()} is installed. Run \`superagent restart\` to switch (workers resume).`));
+  }
+  checkedVersion = true;
 }
 
 async function stop(quiet = false): Promise<void> {
@@ -221,7 +231,8 @@ async function status(): Promise<void> {
     console.log(`  ${dim('Router ')}  ${who}${r.pending ? ` · ${yellow(`${r.pending} events waiting`)}` : ''}${r.lastError && !r.attached ? red(` · last error: ${String(r.lastError).slice(0, 80)}`) : ''}`);
     const parts = ['running', 'queued', 'waiting', 'done', 'failed'].filter((k) => c[k]).map((k) => STATUS_COLOR[k](`${c[k]} ${k}`));
     console.log(`  ${dim('Workers')}  ${parts.join(' · ') || 'none yet'} ${dim(`(max ${s.workers.max} in parallel)`)}`);
-    console.log(`  ${dim('Agents ')}  ${s.agents.map((a: any) => (a.installed ? `${green('✓')} ${a.id}` : `${red('✗')} ${dim(a.id)}`)).join('  ')}`);
+    const agentList = s.agents.map((a: any) => (a.installed ? `${green('✓')} ${a.id}` : `${red('✗')} ${dim(a.id)}`)).join('  ');
+    console.log(`  ${dim('Agents ')}  ${agentList || dim('detecting…')}`);
     const gh = s.github;
     console.log(
       `  ${dim('Inputs ')}  GitHub ${gh.enabled ? `${gh.repos} repo${gh.repos === 1 ? '' : 's'}${gh.login ? ` as @${gh.login}` : ''}` : 'off'}${
@@ -234,7 +245,7 @@ async function status(): Promise<void> {
 // ---------- the router: an attached agent session ----------
 
 /** Workers see the skill too. They may look around, but only the router changes anything. */
-const WORKER_COMMANDS = new Set(['status', 'workers', 'ls', 'logs', 'recall', 'graph', 'memory', 'activity', 'agents', 'doctor', 'hook']);
+const WORKER_COMMANDS = new Set(['status', 'workers', 'ls', 'logs', 'diff', 'recall', 'graph', 'memory', 'activity', 'agents', 'doctor', 'hook']);
 
 function refuseInWorker(cmd: string | undefined, sub: string | undefined): void {
   const w = process.env.SUPERAGENT_WORKER;
@@ -242,6 +253,25 @@ function refuseInWorker(cmd: string | undefined, sub: string | undefined): void 
   const readOnly =
     cmd === undefined || WORKER_COMMANDS.has(cmd) || (cmd === 'config' && (!sub || sub === 'get')) || ((cmd === 'repo' || cmd === 'repos') && (!sub || sub === 'list'));
   if (!readOnly) die(`You are SuperAgent worker ${w}; \`superagent ${cmd}\` is for the router. Finish your own task and end with your report.`);
+}
+
+/**
+ * `--repo` takes a configured name, an owner/repo slug, or a folder ("." for the project the agent is
+ * in). A folder that isn't configured yet is added on the spot, so working "here" takes one command.
+ */
+async function repoArg(value: string | undefined): Promise<string | undefined> {
+  if (!value) return undefined;
+  await ensureRunning();
+  const cfg = await api<{ repos: { name: string; slug?: string; path?: string }[] }>('GET', '/api/config');
+  const v = value.toLowerCase();
+  if (cfg.repos.some((r) => r.name.toLowerCase() === v || r.slug?.toLowerCase() === v)) return value;
+  const dir = path.resolve(value);
+  if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return value; // the router reports it as unknown
+  const known = await repoForFolder(cfg.repos as never, dir);
+  if (known) return known.name;
+  const added = await api('POST', '/api/repos', { input: dir });
+  console.error(dim(`Added repository ${added.name}${added.slug ? ` (${added.slug})` : ''} at ${added.path}.`));
+  return added.name;
 }
 
 async function act(action: Record<string, unknown>, print: (r: any) => void): Promise<void> {
@@ -311,6 +341,7 @@ async function workers(all: boolean): Promise<void> {
         `${bold(fit('W#' + w.id, 6))} ${st} ${dim(fit(w.agent, 9))} ${fit(w.title, 44)} ${dim(fit(w.repo ?? '-', 14))} ${dim(fit(ago(w.created_at), 8))}${w.pr_url ? ' ' + blue(w.pr_url) : ''}`,
       );
       if (w.status === 'waiting' && w.summary) console.log(yellow(`        ${String(w.summary).split('\n').pop()}`));
+      else if (w.status === 'running' && w.last) console.log(dim(`        ▸ ${fit(w.last, 100).trimEnd()}`));
     }
   });
 }
@@ -357,6 +388,42 @@ async function logs(idArg: string | undefined, follow: boolean): Promise<void> {
   await new Promise(() => {});
 }
 
+/** `superagent diff W#3 [--patch]`: what a worker changed, so the router can tell the user without reading files. */
+async function diff(idArg: string | undefined, patch: boolean): Promise<void> {
+  await ensureRunning();
+  const id = workerRef(idArg);
+  const { worker: w } = await api('GET', `/api/workers/${id.slice(2)}`);
+  if (!w.cwd || !fs.existsSync(w.cwd)) die(`${id}'s workspace is gone (archived).${w.pr_url ? ` Its PR: ${w.pr_url}` : ''}`);
+  if (!w.branch) {
+    // A scratch folder: list what is in it.
+    const files: string[] = [];
+    const walk = (dir: string, rel = '') => {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (files.length >= 200 || e.name === 'node_modules' || e.name === '.git') continue;
+        if (e.isDirectory()) walk(path.join(dir, e.name), path.join(rel, e.name));
+        else files.push(path.join(rel, e.name));
+      }
+    };
+    walk(w.cwd);
+    return out({ worker: id, folder: w.cwd, files }, () => {
+      console.log(`${bold(id)} works in a scratch folder: ${w.cwd}`);
+      for (const f of files) console.log(`  ${f}`);
+    });
+  }
+  const git = async (...a: string[]) => (await run('git', ['-C', w.cwd, ...a], { timeoutMs: 60_000 })).stdout.trimEnd();
+  const range = `${w.base}...HEAD`;
+  const [commits, stat, status] = await Promise.all([git('log', '--oneline', `${w.base}..HEAD`), git('diff', '--stat', range), git('status', '--short')]);
+  const text = patch ? [await git('diff', range), await git('diff')].filter(Boolean).join('\n') : '';
+  out({ worker: id, branch: w.branch, base: w.base, folder: w.cwd, pr: w.pr_url, commits: commits.split('\n').filter(Boolean), stat, uncommitted: status, patch: patch ? text : undefined }, () => {
+    console.log(`${bold(id)} on ${cyan(w.branch)} (from ${w.base})${w.pr_url ? ` · PR ${blue(w.pr_url)}` : ''}`);
+    console.log(dim(`  ${w.cwd}`));
+    console.log(commits ? `\nCommits:\n${commits.replace(/^/gm, '  ')}` : '\nNo commits yet.');
+    if (stat) console.log(`\n${stat}`);
+    if (status) console.log(`\nNot committed:\n${status.replace(/^/gm, '  ')}`);
+    if (patch && text) console.log(`\n${text}`);
+  });
+}
+
 async function graph(v: Record<string, any>): Promise<void> {
   await ensureRunning();
   const g = await api('GET', '/api/graph');
@@ -401,9 +468,10 @@ async function repo(sub: string | undefined, rest: string[], v: Record<string, a
       : await (async () => {
           const repoCfg = await resolveRepoInput(input, { mode: v.mode as SourceMode, name: v.name, agent: v.agent, allowUsers });
           const cfg = loadConfig();
-          cfg.repos = [...cfg.repos.filter((x) => x.name.toLowerCase() !== repoCfg.name.toLowerCase()), repoCfg];
+          const added = addRepo(cfg.repos, repoCfg, { mode: v.mode, name: v.name, agent: v.agent, allowUsers });
+          cfg.repos = added.repos;
           saveConfig(cfg);
-          return repoCfg;
+          return added.repo;
         })();
     return out(r, () => {
       console.log(`${green('✓')} Added ${bold(r.name)}${r.slug ? ` (${r.slug})` : ''}${r.path ? dim(' · ' + r.path) : ''}`);
@@ -647,6 +715,7 @@ export async function main(argv: string[]): Promise<void> {
       wait: { type: 'string' },
       take: { type: 'boolean' },
       mermaid: { type: 'boolean' },
+      patch: { type: 'boolean' },
       mode: { type: 'string' },
       name: { type: 'string' },
       allow: { type: 'string' },
@@ -664,7 +733,7 @@ export async function main(argv: string[]): Promise<void> {
   if (v.help || cmd === 'help') return out({ help: HELP.replace(/\x1b\[\d+m/g, '') }, () => console.log(HELP));
   // Installing the package is the only step a person takes; every command keeps the skill in place
   // for agents installed later. It must never get in the way of the command itself.
-  if (cmd !== '__daemon' && cmd !== '__watchdog' && cmd !== 'uninstall') {
+  if (cmd !== '__daemon' && cmd !== '__watchdog' && cmd !== 'uninstall' && cmd !== 'hook') {
     try {
       ensureIntegrations();
     } catch {
@@ -714,7 +783,7 @@ export async function main(argv: string[]): Promise<void> {
             task,
             title: v.title,
             agent: v.agent,
-            repo: v.repo,
+            repo: await repoArg(v.repo as string | undefined),
             threads: list(v.follow).map(threadRef),
             reply_thread: v.reply ? threadRef(String(v.reply)) : undefined,
             silent: !!v.silent,
@@ -789,6 +858,8 @@ export async function main(argv: string[]): Promise<void> {
       }
       case 'graph':
         return graph(v);
+      case 'diff':
+        return diff(rest[0], !!v.patch);
       case 'activity':
         return activity();
 

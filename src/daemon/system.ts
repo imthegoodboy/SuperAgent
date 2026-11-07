@@ -13,6 +13,46 @@ export function slugFromRemote(url: string): string | null {
   return m ? `${m[1]}/${m[2]}` : null;
 }
 
+const samePath = (a?: string, b?: string) =>
+  !!a && !!b && (process.platform === 'win32' ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b));
+
+/**
+ * Add a repo to the list without clobbering another one. The same repository (same GitHub slug or same
+ * checkout) is updated in place, keeping its settings except the ones given explicitly. A different
+ * repository with a name that is already taken gets a numbered name.
+ */
+export function addRepo(
+  repos: RepoConfig[],
+  repo: RepoConfig,
+  explicit: { mode?: string; agent?: string; allowUsers?: string[]; name?: string } = {},
+): { repos: RepoConfig[]; repo: RepoConfig } {
+  const same = repos.find((r) => (r.slug && repo.slug && r.slug.toLowerCase() === repo.slug.toLowerCase()) || samePath(r.path, repo.path));
+  if (same) {
+    const merged = normalizeRepo({
+      ...same,
+      slug: same.slug ?? repo.slug,
+      path: repo.path ?? same.path,
+      ...(explicit.name ? { name: explicit.name } : {}),
+      ...(explicit.mode ? { mode: explicit.mode as SourceMode } : {}),
+      ...(explicit.agent ? { agent: explicit.agent as RepoConfig['agent'] } : {}),
+      ...(explicit.allowUsers ? { allowUsers: explicit.allowUsers } : {}),
+    });
+    return { repos: repos.map((r) => (r === same ? merged : r)), repo: merged };
+  }
+  let name = repo.name;
+  const taken = (n: string) => repos.some((r) => r.name.toLowerCase() === n.toLowerCase());
+  for (let i = 2; taken(name); i++) name = `${repo.name}-${i}`;
+  const added = { ...repo, name };
+  return { repos: [...repos, added], repo: added };
+}
+
+/** The configured repo whose checkout contains this folder, if any. */
+export async function repoForFolder(repos: RepoConfig[], folder: string): Promise<RepoConfig | undefined> {
+  const top = await run('git', ['-C', path.resolve(folder), 'rev-parse', '--show-toplevel']);
+  if (top.code !== 0) return undefined;
+  return repos.find((r) => samePath(r.path, top.stdout.trim()));
+}
+
 /** Turn "C:\code\app", "owner/repo" or a GitHub URL into a repo entry. */
 export async function resolveRepoInput(
   input: string,

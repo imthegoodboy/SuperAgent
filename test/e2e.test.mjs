@@ -311,6 +311,33 @@ test('the CLI drives the router: attach, dispatch, events, graph, recall', async
   assert.match(bad.stderr, /not available/);
 });
 
+test('`--repo .` adds the project on first use, and `diff` shows what the worker changed', async () => {
+  const dir = path.join(home, 'here-repo');
+  fs.mkdirSync(dir);
+  const git = (...a) => execFileSync('git', ['-C', dir, ...a], { stdio: 'pipe' }).toString();
+  git('init', '-b', 'main');
+  git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '--allow-empty', '-m', 'init');
+  const here = (task) => spawnSync(process.execPath, [cli, 'dispatch', task, '--repo', '.', '--json'], { env, cwd: dir, encoding: 'utf8' });
+  const first = here('touch a file here');
+  assert.equal(first.status, 0, first.stdout + first.stderr);
+  assert.match(first.stderr, /Added repository here-repo/);
+  const started = JSON.parse(first.stdout);
+  assert.equal(started.repo, 'here-repo');
+  const second = here('another job here');
+  assert.equal(JSON.parse(second.stdout).repo, 'here-repo');
+  assert.doesNotMatch(second.stderr, /Added repository/, 'added once');
+  assert.equal((await call('GET', '/api/config')).repos.filter((r) => r.name.startsWith('here-repo')).length, 1);
+
+  await until(async () => (await worker(started.worker)).status === 'done');
+  const d = sa(['diff', started.worker]);
+  assert.equal(d.status, 0, d.stderr);
+  assert.match(d.stdout, /on superagent\/w\d+-touch-a-file-here \(from main\)/);
+  assert.match(d.stdout, /Not committed:[\s\S]*mock-output\.txt/);
+  const ev = JSON.parse(sa(['events', '--json']).stdout);
+  const n = started.worker.slice(2);
+  assert.ok(ev.text.includes(`branch superagent/w${n}-touch-a-file-here in here-repo (no PR; \`superagent diff ${started.worker}\`)`), ev.text);
+});
+
 test('the Claude Code hook tells the router session what is waiting, and nobody else', async () => {
   await call('POST', '/api/router/attach', { take: true }, 'hook-session');
   await call('GET', '/api/router/events', undefined, 'hook-session');

@@ -8,6 +8,10 @@
     "type": "git",
     "url": "git+https://github.com/imthegoodboy/SuperAgent.git"
   },
+  "homepage": "https://github.com/imthegoodboy/SuperAgent#readme",
+  "bugs": {
+    "url": "https://github.com/imthegoodboy/SuperAgent/issues"
+  },
   "bin": {
     "superagent": "dist/cli.js"
   },
@@ -46,5 +50,8 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "typescript": "^7.0.2"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
