@@ -11,3 +11,6 @@ BasedOn.md
 
 # Local scratch
 .superagent-dev/
+
+# npm pack output
+*.tgz

@@ -37,3 +37,24 @@ jobs:
       - run: npm test
       - name: CLI smoke test
         run: node dist/cli.js --version && node dist/cli.js help
+
+  package:
+    # Pack the package, install it the way a user would, and use it end to end (mock agent).
+    name: installed package (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Pack, install and smoke-test
+        shell: bash
+        run: |
+          npm pack
+          node scripts/smoke-installed.mjs ./phigon-superagent-*.tgz

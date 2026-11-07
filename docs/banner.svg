@@ -1,78 +1,102 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="400" viewBox="0 0 1280 400" role="img" aria-label="SuperAgent: turn the coding agent you already use into an always-on Super-agent">
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="420" viewBox="0 0 1280 420" role="img" aria-label="SuperAgent: turn the coding agent you already use into an always-on Super-agent. npm install -g @phigon/superagent">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#0a0f1f"/>
-      <stop offset="1" stop-color="#14204a"/>
+      <stop offset="0" stop-color="#070b18"/>
+      <stop offset="0.55" stop-color="#0d1530"/>
+      <stop offset="1" stop-color="#16123a"/>
     </linearGradient>
-    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#5b8cff"/>
-      <stop offset="1" stop-color="#8b5cf6"/>
+      <stop offset="1" stop-color="#a26bff"/>
     </linearGradient>
-    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
-      <stop offset="0" stop-color="#6d7dff" stop-opacity="0.45"/>
-      <stop offset="1" stop-color="#6d7dff" stop-opacity="0"/>
+    <linearGradient id="title" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#d9dcff"/>
+    </linearGradient>
+    <radialGradient id="glowA" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#4f6bff" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#4f6bff" stop-opacity="0"/>
     </radialGradient>
-    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
-      <path d="M32 0H0V32" fill="none" stroke="#ffffff" stroke-opacity="0.04"/>
+    <radialGradient id="glowB" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#9b5cff" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#9b5cff" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1" fill="#ffffff" fill-opacity="0.06"/>
     </pattern>
+    <clipPath id="frame"><rect width="1280" height="420" rx="28"/></clipPath>
   </defs>
 
-  <rect width="1280" height="400" rx="28" fill="url(#bg)"/>
-  <rect width="1280" height="400" rx="28" fill="url(#grid)"/>
+  <g clip-path="url(#frame)">
+    <rect width="1280" height="420" fill="url(#bg)"/>
+    <rect width="1280" height="420" fill="url(#dots)"/>
+    <circle cx="300" cy="40" r="320" fill="url(#glowA)"/>
+    <circle cx="1060" cy="420" r="340" fill="url(#glowB)"/>
+  </g>
 
-  <!-- Words -->
+  <!-- Mark: one router, four workers -->
+  <g transform="translate(72 64)">
+    <rect width="64" height="64" rx="16" fill="url(#brand)"/>
+    <g stroke="#ffffff" stroke-width="3" stroke-linecap="round" fill="none" stroke-opacity="0.9">
+      <path d="M24 32 L44 17 M24 32 L46 27 M24 32 L46 37 M24 32 L44 47"/>
+    </g>
+    <circle cx="22" cy="32" r="7" fill="#ffffff"/>
+    <g fill="#ffffff">
+      <circle cx="45" cy="16" r="4"/>
+      <circle cx="48" cy="27" r="4"/>
+      <circle cx="48" cy="37" r="4"/>
+      <circle cx="45" cy="48" r="4"/>
+    </g>
+  </g>
+
   <g font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
-    <text x="84" y="150" font-size="76" font-weight="800" fill="#ffffff" letter-spacing="-1.5">SuperAgent</text>
-    <text x="86" y="206" font-size="27" fill="#c9d3ff">Turn the coding agent you already use</text>
-    <text x="86" y="242" font-size="27" fill="#c9d3ff">into an always-on Super-agent.</text>
-    <text x="86" y="292" font-size="18" fill="#8d9bd0">Claude Code · Codex · OpenCode · Cursor, working in parallel</text>
-  </g>
-  <g font-family="ui-monospace, 'Cascadia Mono', Menlo, Consolas, monospace">
-    <rect x="84" y="318" width="420" height="44" rx="10" fill="#0b1226" stroke="#2c3d78"/>
-    <text x="104" y="347" font-size="18" fill="#7ee0a8">$</text>
-    <text x="124" y="347" font-size="18" fill="#e6ebff">npm install -g @phigon/superagent</text>
+    <text x="154" y="116" font-size="58" font-weight="800" fill="url(#title)" letter-spacing="-1.2">SuperAgent</text>
+    <text x="74" y="186" font-size="27" fill="#c9cff5">Turn the coding agent you already use</text>
+    <text x="74" y="222" font-size="27" fill="#c9cff5">into an always-on <tspan fill="#ffffff" font-weight="700">Super-agent</tspan>.</text>
   </g>
 
-  <!-- Events flowing in -->
-  <g font-family="ui-monospace, 'Cascadia Mono', Menlo, Consolas, monospace" font-size="14" fill="#8d9bd0">
-    <text x="700" y="132">GitHub</text>
-    <text x="700" y="206">CI</text>
-    <text x="700" y="280">you</text>
-  </g>
-  <g stroke="#3b4f93" stroke-width="2" fill="none" stroke-dasharray="4 6">
-    <path d="M758 128 C 806 128, 822 200, 868 200"/>
-    <path d="M758 202 L 868 202"/>
-    <path d="M758 276 C 806 276, 822 204, 868 204"/>
+  <!-- Agents it runs -->
+  <g font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#dfe4ff">
+    <rect x="74" y="250" width="130" height="32" rx="16" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.14"/>
+    <circle cx="93" cy="266" r="4" fill="#e0866b"/>
+    <text x="105" y="271">Claude Code</text>
+    <rect x="214" y="250" width="88" height="32" rx="16" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.14"/>
+    <circle cx="233" cy="266" r="4" fill="#7ee0a8"/>
+    <text x="245" y="271">Codex</text>
+    <rect x="312" y="250" width="118" height="32" rx="16" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.14"/>
+    <circle cx="331" cy="266" r="4" fill="#f2c94c"/>
+    <text x="343" y="271">OpenCode</text>
+    <rect x="440" y="250" width="96" height="32" rx="16" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.14"/>
+    <circle cx="459" cy="266" r="4" fill="#8fb4ff"/>
+    <text x="471" y="271">Cursor</text>
   </g>
 
-  <!-- The router -->
-  <circle cx="930" cy="202" r="110" fill="url(#glow)"/>
-  <circle cx="930" cy="202" r="58" fill="url(#accent)"/>
-  <circle cx="930" cy="202" r="58" fill="none" stroke="#ffffff" stroke-opacity="0.35" stroke-width="2"/>
-  <text x="930" y="198" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="17" font-weight="700" fill="#ffffff">your agent</text>
-  <text x="930" y="220" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" fill="#e7e9ff">router</text>
+  <!-- Install -->
+  <g font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Menlo, Consolas, monospace" font-size="16">
+    <rect x="74" y="310" width="548" height="50" rx="12" fill="#060a16" stroke="url(#brand)" stroke-width="1.5"/>
+    <text x="96" y="341" xml:space="preserve"><tspan fill="#7ee0a8">$</tspan><tspan fill="#eef1ff"> npm i -g @phigon/superagent</tspan><tspan fill="#8c96c4"> &amp;&amp; superagent install</tspan></text>
+  </g>
 
-  <!-- Workers -->
-  <g stroke="#5b8cff" stroke-width="2" fill="none" stroke-opacity="0.8">
-    <path d="M986 186 C 1030 150, 1040 88, 1078 88"/>
-    <path d="M988 196 C 1030 180, 1040 160, 1078 160"/>
-    <path d="M988 208 C 1030 222, 1040 232, 1078 232"/>
-    <path d="M986 218 C 1030 254, 1040 304, 1078 304"/>
-  </g>
-  <g font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="15" font-weight="600">
-    <rect x="1078" y="68" width="140" height="40" rx="20" fill="#111a38" stroke="#5b8cff"/>
-    <text x="1148" y="93" text-anchor="middle" fill="#e6ebff">Claude Code</text>
-    <rect x="1078" y="140" width="140" height="40" rx="20" fill="#111a38" stroke="#5b8cff"/>
-    <text x="1148" y="165" text-anchor="middle" fill="#e6ebff">Codex</text>
-    <rect x="1078" y="212" width="140" height="40" rx="20" fill="#111a38" stroke="#5b8cff"/>
-    <text x="1148" y="237" text-anchor="middle" fill="#e6ebff">OpenCode</text>
-    <rect x="1078" y="284" width="140" height="40" rx="20" fill="#111a38" stroke="#5b8cff"/>
-    <text x="1148" y="309" text-anchor="middle" fill="#e6ebff">Cursor</text>
-  </g>
-  <g fill="#7ee0a8">
-    <circle cx="1206" cy="88" r="4"/>
-    <circle cx="1206" cy="160" r="4"/>
-    <circle cx="1206" cy="232" r="4"/>
-    <circle cx="1206" cy="304" r="4"/>
+  <!-- A session, as it looks in your agent -->
+  <g transform="translate(652 52)">
+    <rect width="556" height="316" rx="18" fill="#080d1d" fill-opacity="0.92" stroke="#ffffff" stroke-opacity="0.12"/>
+    <path d="M0 18 a18 18 0 0 1 18 -18 h520 a18 18 0 0 1 18 18 v24 h-556 z" fill="#ffffff" fill-opacity="0.04"/>
+    <circle cx="24" cy="21" r="6" fill="#ff5f57"/>
+    <circle cx="44" cy="21" r="6" fill="#febc2e"/>
+    <circle cx="64" cy="21" r="6" fill="#28c840"/>
+    <text x="278" y="26" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" fill="#8c96c4">your agent · superagent</text>
+
+    <g font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Menlo, Consolas, monospace" font-size="15">
+      <text x="24" y="80"><tspan fill="#a26bff" font-weight="700">you ›</tspan><tspan fill="#eef1ff"> use superagent: fix the flaky login</tspan></text>
+      <text x="24" y="104" fill="#eef1ff">test, and have Codex add CSV export</text>
+
+      <text x="24" y="146" fill="#5b8cff">▶</text><text x="46" y="146" fill="#eef1ff">W#4</text><text x="98" y="146" fill="#e0866b">Claude Code</text><text x="226" y="146" fill="#aab3dc">Fix flaky login test</text>
+      <text x="24" y="172" fill="#5b8cff">▶</text><text x="46" y="172" fill="#eef1ff">W#5</text><text x="98" y="172" fill="#7ee0a8">Codex</text><text x="226" y="172" fill="#aab3dc">CSV export</text>
+      <text x="46" y="198" fill="#8c96c4">Both running. Ask me anything meanwhile.</text>
+
+      <rect x="16" y="222" width="524" height="72" rx="10" fill="#7ee0a8" fill-opacity="0.07" stroke="#7ee0a8" stroke-opacity="0.25"/>
+      <text x="32" y="250"><tspan fill="#7ee0a8" font-weight="700">✓ W#4 done</tspan><tspan fill="#eef1ff"> · the test raced the session</tspan></text>
+      <text x="32" y="276"><tspan fill="#eef1ff">refresh · draft PR </tspan><tspan fill="#8fb4ff" text-decoration="underline">#41</tspan><tspan fill="#8c96c4">  · W#5 still working</tspan></text>
+    </g>
   </g>
 </svg>
