@@ -10,7 +10,7 @@ import { isAlive, killTree, run } from '../agents/process.js';
 import { detectAgents } from '../agents/runner.js';
 import { autostartStatus, installSkill, openUrl, resolveRepoInput, setAutostart, skillStatus } from '../daemon/system.js';
 import { STOP_FLAG, watchdogPid } from '../daemon/watchdog.js';
-import { api, baseUrl, events, health } from './client.js';
+import { api, baseUrl, events, health, token } from './client.js';
 
 // ---------- output helpers ----------
 
@@ -226,8 +226,11 @@ async function say(text: string): Promise<void> {
   await Promise.race([ready, sleep(3000)]);
   const { message } = await api('POST', '/api/messages', { text });
   sentId = message.id;
-  const timeout = sleep(240_000).then(() => 'timeout');
+  // A cleared timer, not sleep(): a pending timer would keep the process alive after the reply.
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<'timeout'>((r) => (timer = setTimeout(() => r('timeout'), 240_000)));
   const r = await Promise.race([replied, timeout]);
+  clearTimeout(timer);
   close();
   if (r === 'timeout') die('No reply within 4 minutes. Check `superagent status`.');
 }
@@ -473,7 +476,8 @@ export async function main(argv: string[]): Promise<void> {
   if (v.version || cmd === 'version') return console.log(pkgVersion());
   if (v.help || cmd === 'help') return console.log(HELP);
 
-  try {
+  // The cases `return someCommand()`; awaiting the whole switch makes their rejections reach the catch.
+  const dispatch = async (): Promise<void> => {
     switch (cmd) {
       case undefined:
         await status();
@@ -499,7 +503,8 @@ export async function main(argv: string[]): Promise<void> {
       case 'open':
       case 'ui':
         if (!(await health())) await start(false);
-        openUrl(baseUrl() + '/');
+        // The token rides along once; the page stores it and removes it from the address bar.
+        openUrl(`${baseUrl()}/?t=${token()}`);
         return console.log(`Opened ${baseUrl()}`);
       case 'chat':
         return chat();
@@ -563,6 +568,9 @@ export async function main(argv: string[]): Promise<void> {
         console.log(HELP);
         die(`Unknown command "${cmd}"`);
     }
+  };
+  try {
+    await dispatch();
   } catch (e) {
     die((e as Error).message);
   }

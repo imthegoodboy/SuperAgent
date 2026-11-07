@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { AGENT_IDS } from '../core/config.js';
 import { paths } from '../core/paths.js';
@@ -141,7 +142,8 @@ export async function detectAgents(): Promise<AgentInfo[]> {
         return info;
       }
       if (id === 'mock') return { ...info, installed: true, version: 'test' };
-      const r = await run(a.command, ['--version'], { timeoutMs: 20_000, cwd: paths.home });
+      // Home, not ~/.superagent: `doctor` runs before the data folder exists.
+      const r = await run(a.command, ['--version'], { timeoutMs: 20_000, cwd: os.homedir() });
       const out = (r.stdout || r.stderr).trim().split(/\r?\n/).filter(Boolean);
       if (r.code === 0) {
         info.installed = true;

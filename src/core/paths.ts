@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -5,6 +6,9 @@ import { fileURLToPath } from 'node:url';
 
 /** Everything SuperAgent keeps lives under one folder. SUPERAGENT_HOME overrides it (tests, dev). */
 export const HOME = path.resolve(process.env.SUPERAGENT_HOME || path.join(os.homedir(), '.superagent'));
+
+/** Identifies which data folder a running daemon serves, without revealing the path. */
+export const HOME_ID = crypto.createHash('sha256').update(HOME.toLowerCase()).digest('hex').slice(0, 12);
 
 export const paths = {
   home: HOME,
