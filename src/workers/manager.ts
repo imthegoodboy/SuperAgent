@@ -29,6 +29,8 @@ export interface CreateWorker {
   silent?: boolean;
   /** Branch or ref to start from instead of the repo's default branch. */
   base?: string | null;
+  /** Start only after this worker is done. */
+  after?: number | null;
   createdBy: 'router' | 'user';
 }
 
@@ -42,6 +44,8 @@ export class WorkerManager {
   private active = new Map<number, ActiveRun>();
   private memoryTimer: NodeJS.Timeout | null = null;
   private memoryNoted = 0;
+  /** Branches still being copied from a worker's own clone into the repo (a dependent waits for them). */
+  private syncing = new Map<number, Promise<void>>();
 
   /** Less free memory than workers.minFreeMemoryMB (logged at most every 10 minutes). */
   private lowMemory(): boolean {
@@ -86,6 +90,7 @@ export class WorkerManager {
       origin_trigger_id: spec.originTriggerId ?? null,
       silent: spec.silent,
       base: spec.base ?? null,
+      after_worker: spec.after ?? null,
       created_by: spec.createdBy,
     });
     const threads = new Set(spec.threads ?? []);
@@ -131,6 +136,8 @@ export class WorkerManager {
     }
     this.announce(w, `Stopped ${ref.W(id)}: ${reason}`, 'stopped');
     this.changed(id);
+    // A queued worker has no run to end; workers waiting --after it must hear now that it won't be done.
+    if (!a) setImmediate(() => this.schedule());
   }
 
   /** End the current run and resume it at once with a message (the watchdog's nudge, or the router redirecting it). */
@@ -160,12 +167,12 @@ export class WorkerManager {
   }
 
   /** Archive finished workers last touched more than `days` ago; returns their ids. */
-  async cleanup(days: number): Promise<number[]> {
+  async cleanup(days: number, dryRun = false): Promise<number[]> {
     const before = Date.now() - days * 86_400_000;
     const old = this.app.store
       .all<WorkerRow>("SELECT * FROM workers WHERE archived = 0 AND status IN ('done', 'failed', 'stopped') AND updated_at < ? ORDER BY id", before)
       .filter((w) => !this.active.has(w.id));
-    for (const w of old) await this.archive(w.id);
+    if (!dryRun) for (const w of old) await this.archive(w.id);
     return old.map((w) => w.id);
   }
 
@@ -179,8 +186,40 @@ export class WorkerManager {
     this.schedule();
   }
 
+  /** Why a queued worker isn't running yet: its dependency, all slots busy, or too little memory. */
+  queueReason(w: WorkerRow): { reason: 'after' | 'slot' | 'memory'; detail: string } | null {
+    if (w.status !== 'queued') return null;
+    const dep = w.after_worker ? this.app.store.workerById(w.after_worker) : null;
+    if (dep && dep.status !== 'done') return { reason: 'after', detail: `waits for ${ref.W(dep.id)} (${dep.status})` };
+    if (dep && this.syncing.has(dep.id)) return { reason: 'after', detail: `waits for ${ref.W(dep.id)}'s branch to be copied into the repo` };
+    const max = this.app.config.workers.maxConcurrent;
+    if (this.active.size >= max) return { reason: 'slot', detail: `${this.active.size}/${max} slots busy` };
+    const free = Math.round(os.freemem() / 1048576);
+    const need = this.app.config.workers.minFreeMemoryMB;
+    if (this.active.size > 0 && free < need) return { reason: 'memory', detail: `${free} MB free, needs ${need} MB (workers.minFreeMemoryMB)` };
+    return null;
+  }
+
+  /** Workers dispatched --after one that failed or was stopped: it will never be done, so they fail now. */
+  private failBrokenDependents(): void {
+    const { store } = this.app;
+    for (const w of store.workersWithStatus('queued')) {
+      const dep = w.after_worker ? store.workerById(w.after_worker) : null;
+      if (!dep || !['failed', 'stopped'].includes(dep.status)) continue;
+      const msg = `${ref.W(dep.id)} ended ${dep.status}, and this task was to start after it`;
+      store.updateWorker(w.id, { status: 'failed', error: msg });
+      store.addLog(w.id, null, 'error', msg);
+      this.report(w.id, 'failed', '', null, null, msg);
+      this.changed(w.id);
+    }
+  }
+
   private needsRun(w: WorkerRow): boolean {
     if (w.archived || this.active.has(w.id)) return false;
+    if (w.after_worker && w.status === 'queued') {
+      const dep = this.app.store.workerById(w.after_worker);
+      if (dep && (dep.status !== 'done' || this.syncing.has(dep.id))) return false;
+    }
     if (w.status === 'queued') return true;
     return this.app.store.undelivered(w.id).length > 0;
   }
@@ -188,6 +227,9 @@ export class WorkerManager {
   schedule(): void {
     const { store } = this.app;
     const max = this.app.config.workers.maxConcurrent;
+    // Even when every slot is busy. Workers come in id order and a dependent is always newer than what it
+    // waits for, so a whole chain fails in this one pass.
+    this.failBrokenDependents();
     if (this.active.size >= max) return;
     const ids = new Set<number>([...store.workersWithStatus('queued').map((w) => w.id), ...store.workersWithMail()]);
     for (const id of [...ids].sort((a, b) => a - b)) {
@@ -214,6 +256,12 @@ export class WorkerManager {
       if (!adapter) throw new Error(`Unknown agent "${w.agent}"`);
       let ws: Workspace;
       if (!w.cwd) {
+        // dispatch --after in the same repo: build on that worker's branch, so its work is there.
+        const dep = w.after_worker && !w.base ? store.workerById(w.after_worker) : null;
+        if (dep?.branch && dep.repo === w.repo) {
+          store.updateWorker(id, { base: dep.branch });
+          w = store.workerById(id)!;
+        }
         store.updateWorker(id, { status: 'running' });
         this.changed(id);
         ws = await prepareWorkspace(w, repo, { ownGitDir: !!adapter.needsOwnGitDir?.(config.workers.autonomy) });
@@ -306,7 +354,13 @@ export class WorkerManager {
     const w = store.workerById(id)!;
     const ended = Date.now();
     // Whatever the run committed in its own clone belongs in the repo, however the run ended.
-    void syncBranch(w, this.app.findRepo(w.repo ?? undefined)).catch((e) => log(`worker ${ref.W(id)}: branch sync failed:`, (e as Error).message));
+    const sync = syncBranch(w, this.app.findRepo(w.repo ?? undefined))
+      .catch((e) => log(`worker ${ref.W(id)}: branch sync failed:`, (e as Error).message))
+      .finally(() => {
+        this.syncing.delete(id);
+        this.schedule(); // workers dispatched --after this one can start now
+      });
+    this.syncing.set(id, sync);
     if (entry.ending === 'stopped' || entry.ending === 'shutdown') {
       store.updateRun(runId, { status: entry.ending, ended_at: ended, exit_code: res.code });
       return;
@@ -369,7 +423,7 @@ export class WorkerManager {
     const endLog = store.addLog(id, runId, status === 'failed' ? 'error' : 'system', `Run finished: ${status}${error ? ` · ${snippet(error, 300)}` : ''}`);
     emit('worker_log', endLog);
     if (report?.question) emit('worker_log', store.addLog(id, runId, 'inbox', `Question for you: ${report.question}`));
-    this.report(id, report?.status ?? (error ? 'failed' : 'done'), summary, pr, report?.question ?? null, error);
+    this.report(id, report?.status ?? (error ? 'failed' : 'done'), summary, pr, report?.question ?? null, error, report?.verified ?? null);
     const line =
       status === 'waiting' ? `${ref.W(id)} needs your input: ${w.title}` : `${status === 'done' ? 'Finished' : 'Failed'} ${ref.W(id)}: ${w.title}`;
     // A silent task is only news when it changed something.
@@ -390,13 +444,13 @@ export class WorkerManager {
     this.app.store.subscribe(id, th.id);
   }
 
-  private report(id: number, status: string, summary: string, pr: string | null, question: string | null, error: string | null): void {
+  private report(id: number, status: string, summary: string, pr: string | null, question: string | null, error: string | null, verified: string | null = null): void {
     const w = this.app.store.workerById(id);
     this.app.ingest.ingest({
       source: 'worker',
       kind: 'report',
       text: summary || error || '(no summary)',
-      meta: { worker: id, status, pr_url: pr, question, error },
+      meta: { worker: id, status, pr_url: pr, question, error, verified },
       // Acting ahead (Section 3.4): a silent task is only news if it worked. Its other results are kept
       // on the worker and in the activity log, but no router is asked to announce them.
       // (no_change, nothing needed doing, is dropped the same way.)
@@ -427,6 +481,7 @@ export class WorkerManager {
         'SuperAgent restarted while you were working. Check the current state of your workspace (git status, files) and continue the task.',
       );
       store.updateWorker(w.id, { status: 'queued', pid: null });
+      store.addLog(w.id, null, 'system', 'SuperAgent restarted during this run; resuming it (the step in progress is redone)');
       log(`worker ${ref.W(w.id)} will resume after restart`);
     }
     this.schedule();

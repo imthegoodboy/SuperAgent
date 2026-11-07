@@ -18,7 +18,12 @@ const cloning = new Map<string, Promise<void>>();
 /** Local checkout for a configured repo, cloning it on first use when only owner/repo is known. */
 export async function ensureCheckout(repo: RepoConfig): Promise<string> {
   if (repo.path) {
-    if (!fs.existsSync(path.join(repo.path, '.git'))) throw new Error(`${repo.path} is not a git repository`);
+    if (!fs.existsSync(path.join(repo.path, '.git'))) {
+      throw new Error(
+        `${repo.path} is not a git repository${fs.existsSync(repo.path) ? '' : ' (the folder is gone: moved or deleted?)'}. ` +
+          `Fix it with \`superagent repo rm ${repo.name}\` and then \`superagent repo add <new path> --name ${repo.name}\`.`,
+      );
+    }
     return repo.path;
   }
   if (!repo.slug) throw new Error(`repo ${repo.name} has neither a path nor a GitHub slug`);

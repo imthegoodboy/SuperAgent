@@ -1,11 +1,12 @@
 // First-run CLI behaviour with a brand-new data folder and no daemon running.
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const cli = path.join(root, 'dist', 'cli.js');
@@ -16,6 +17,39 @@ const env = { ...process.env, SUPERAGENT_HOME: home, SUPERAGENT_SKIP_INTEGRATION
 const sa = (...args) => spawnSync(process.execPath, [cli, ...args], { env, encoding: 'utf8', timeout: 60_000 });
 
 after(() => fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 3 }));
+
+test('the CLI asks again after a dropped connection only for pure reads', async () => {
+  const dir = path.join(tmp, 'retry');
+  fs.mkdirSync(dir, { recursive: true });
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    seen.push(`${req.method} ${req.url}`);
+    // The first time each request arrives, drop the connection as a closed keep-alive socket would.
+    if (seen.filter((s) => s === `${req.method} ${req.url}`).length === 1) return req.socket.resetAndDestroy();
+    res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ port: server.address().port }));
+  const client = pathToFileURL(path.join(root, 'dist', 'cli', 'client.js')).href;
+  const call = (method, p) =>
+    new Promise((resolve) => {
+      const script = `import(${JSON.stringify(client)}).then((m) => m.api(${JSON.stringify(method)}, ${JSON.stringify(p)}, ${method === 'GET' ? 'undefined' : '{}'})).then((r) => console.log(JSON.stringify(r)), (e) => console.log('ERR ' + e.message))`;
+      const child = spawn(process.execPath, ['--input-type=module', '-e', script], { env: { ...env, SUPERAGENT_HOME: dir } });
+      let out = '';
+      child.stdout.on('data', (c) => (out += c));
+      child.on('close', () => resolve(out.trim()));
+    });
+  try {
+    assert.equal(await call('GET', '/api/workers'), '{"ok":true}', 'a read is asked again');
+    assert.match(await call('POST', '/api/router/actions'), /^ERR Request to SuperAgent failed/, 'a change is not repeated');
+    assert.match(await call('GET', '/api/router/events?wait=0'), /^ERR /, '`events` hands a batch out, so it is not repeated');
+    assert.equal(await call('GET', '/api/router/events?again=1'), '{"ok":true}');
+    assert.equal(seen.filter((s) => s.startsWith('POST')).length, 1);
+    assert.equal(seen.filter((s) => s === 'GET /api/router/events?wait=0').length, 1);
+  } finally {
+    server.close();
+  }
+});
 
 test('config and repo commands work before the daemon ever ran', () => {
   const set = sa('config', 'set', 'port', '17999');

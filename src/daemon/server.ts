@@ -8,7 +8,9 @@ import { bus, emit, parseRef, ref } from '../core/util.js';
 import { graphData, renderGraphMermaid, renderGraphTree, renderRecall } from '../router/render.js';
 import { LeaseConflict, normalizeActions } from '../router/router.js';
 import { addRepo, resolveRepoInput } from './system.js';
+import type { AddressInfo } from 'node:net';
 import { run } from '../agents/process.js';
+import { serve } from '../cli/preview.js';
 
 // The API is for the `superagent` CLI, which agents (Claude Code, Codex, …) drive. There is no web UI.
 
@@ -42,6 +44,15 @@ function id(params: string[], i = 0): number {
   if (!Number.isInteger(n) || n <= 0) throw new HttpError(400, 'bad id');
   return n;
 }
+
+/** Time each worker's agent has spent on its runs so far. */
+function elapsedByWorker(app: App): Map<number, number> {
+  const rows = app.store.all<{ worker_id: number; ms: number }>('SELECT worker_id, SUM(COALESCE(ended_at, ?) - started_at) AS ms FROM worker_runs GROUP BY worker_id', Date.now());
+  return new Map(rows.map((r) => [r.worker_id, r.ms]));
+}
+
+/** Folders `superagent serve` asked the service to serve, by folder. They live as long as the service. */
+const served = new Map<string, { server: http.Server; url: string }>();
 
 function requireWorker(app: App, n: number) {
   const w = app.store.workerById(n);
@@ -88,6 +99,8 @@ route('POST', '/api/router/detach', ({ app, req }) =>
   }),
 );
 route('GET', '/api/router/events', ({ app, query, signal, req }) => {
+  if (query.get('peek')) return asRouter(() => ({ text: app.router.pendingText(sessionOf(req)) }));
+  if (query.get('again')) return asRouter(() => ({ text: app.router.lastBatch(sessionOf(req)) }));
   // fetch() gives up on a response after 300 s, so long polls stay below that.
   const wait = Math.min(280, Math.max(0, Number(query.get('wait')) || 0));
   return asRouter(() => app.router.events(wait * 1000, signal, sessionOf(req), whoOf(req)));
@@ -111,19 +124,69 @@ route('GET', '/api/recall', ({ app, query }) => {
   });
   return { text, missing };
 });
-route('GET', '/api/graph', ({ app }) => {
-  const g = graphData(app);
+route('GET', '/api/graph', ({ app, query }) => {
+  const g = graphData(app, !!query.get('all'));
   return { ...g, tree: renderGraphTree(g), mermaid: renderGraphMermaid(g) };
 });
 
-route('GET', '/api/workers', ({ app, query }) =>
-  app.store.listWorkers(query.get('archived') === 'only' ? 'archived' : query.get('archived') === '1' ? 'all' : 'current').map((w) =>
-    // Active workers carry their recent event kinds so the UI can draw activity tracks right away.
+route('GET', '/api/workers', ({ app, query }) => {
+  // ?ids=3,4: just those (any age; the list itself is capped).
+  const ids = String(query.get('ids') ?? '').split(',').map(Number).filter((n) => Number.isInteger(n) && n > 0);
+  const rows = ids.length
+    ? ids.map((n) => app.store.workerById(n)).filter((w): w is NonNullable<typeof w> => !!w)
+    : app.store.listWorkers(query.get('archived') === 'only' ? 'archived' : query.get('archived') === '1' ? 'all' : 'current');
+  const ms = elapsedByWorker(app);
+  return rows.map((w) =>
+    // Active workers carry their last step and why they wait.
     ['queued', 'running', 'waiting'].includes(w.status)
-      ? { ...w, ticks: app.store.tailLogs(w.id, 48).map((l) => l.kind), last: app.store.tailLogs(w.id, 1)[0]?.text.split('\n')[0].slice(0, 200) ?? null }
-      : w,
-  ),
-);
+      ? {
+          ...w,
+          elapsed_ms: ms.get(w.id) ?? 0,
+          ticks: app.store.tailLogs(w.id, 48).map((l) => l.kind),
+          last: app.store.tailLogs(w.id, 1)[0]?.text.split('\n')[0].slice(0, 200) ?? null,
+          waiting: app.workers.queueReason(w)?.detail ?? null,
+        }
+      : { ...w, elapsed_ms: ms.get(w.id) ?? 0 },
+  );
+});
+
+// `superagent serve`: the service keeps the folder served, so the command returns at once.
+route('POST', '/api/serve', async ({ body }) => {
+  const root = path.resolve(String(body?.root ?? ''));
+  if (!body?.root || !fs.existsSync(root) || !fs.statSync(root).isDirectory()) throw new HttpError(400, `not a folder: ${root}`);
+  const page = String(body?.page ?? '').replace(/^\/+/, '');
+  const wants = (s: { url: string } | undefined) => !!s && (!body?.port || new URL(s.url).port === String(body.port));
+  if (wants(served.get(root))) return { url: served.get(root)!.url + page, folder: root, reused: true };
+  if (!served.has(root) && served.size >= 20) throw new HttpError(400, 'already serving 20 folders; stop some with `superagent serve --stop`');
+  let server: http.Server;
+  try {
+    server = await serve(root, Number(body?.port) || 0);
+  } catch (e) {
+    // The old URL, if any, keeps working.
+    throw new HttpError(400, `could not serve on port ${body?.port}: ${(e as Error).message}`);
+  }
+  // Another request for this folder may have finished while this one was starting: keep one server.
+  if (wants(served.get(root))) {
+    server.close();
+    return { url: served.get(root)!.url + page, folder: root, reused: true };
+  }
+  served.get(root)?.server.close(); // a different --port replaces the old server only once the new one listens
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/`;
+  served.set(root, { server, url });
+  return { url: url + page, folder: root, reused: false };
+});
+route('GET', '/api/serve', () => [...served.entries()].map(([folder, s]) => ({ folder, url: s.url })));
+route('DELETE', '/api/serve', ({ query }) => {
+  const only = query.get('root') ? path.resolve(String(query.get('root'))) : null;
+  const stopped: string[] = [];
+  for (const [folder, s] of served) {
+    if (only && folder !== only) continue;
+    s.server.close();
+    served.delete(folder);
+    stopped.push(folder);
+  }
+  return { stopped };
+});
 route('GET', '/api/workers/:id', ({ app, params }) => {
   const w = requireWorker(app, id(params));
   return {
@@ -162,7 +225,8 @@ route('POST', '/api/workers/:id/retry', ({ app, params }) => {
 route('POST', '/api/workers/cleanup', async ({ app, body }) => {
   const days = Number(body?.days ?? 7);
   if (!Number.isFinite(days) || days < 0) throw new HttpError(400, 'days must be 0 or more');
-  const archived = await app.workers.cleanup(days);
+  const archived = await app.workers.cleanup(days, !!body?.dryRun);
+  if (body?.dryRun) return { archived: archived.map((id) => ref.W(id)), dryRun: true };
   // Worktrees whose folders are gone (deleted by hand, say) are forgotten by git too.
   for (const repo of app.config.repos) {
     const dir = repo.path ?? (repo.slug ? path.join(paths.repos, ...repo.slug.split('/')) : null);
@@ -341,7 +405,7 @@ function sse(app: App, req: http.IncomingMessage, res: http.ServerResponse): voi
 }
 
 export function createServer(app: App): http.Server {
-  return http.createServer(async (req, res) => {
+  const server = http.createServer(async (req, res) => {
     const port = app.listenPort || app.config.port;
     const host = String(req.headers.host ?? '');
     // DNS-rebinding guard: only answer to our own loopback names.
@@ -380,4 +444,9 @@ export function createServer(app: App): http.Server {
     }
     return send(res, 404, { error: 'not found' });
   });
+  // Clients (fetch) reuse idle connections for about 4 s; Node closes them after 5 s. A client that is
+  // slow to notice, on a busy machine, then writes to a closed socket (ECONNRESET). Keep them open longer.
+  server.keepAliveTimeout = 65_000;
+  server.headersTimeout = 66_000;
+  return server;
 }

@@ -39,6 +39,8 @@ context was reset) or the user confirms it has ended; otherwise tell the user wh
 2. **After every user message, and before you answer "what's going on"** → `superagent events`.
    Handle each event (below). If none, say nothing about it. In Claude Code, a `[SuperAgent]` notice
    on your context lists events that are waiting when the user writes; handle those the same way.
+   `events` hands a batch out as it prints it, so never pipe it through `head` or `tail`. A batch ends
+   with an `[end of …]` line; if you don't see one, run `superagent events --again` to print it again.
 3. **The user asks you to keep watching** (or there is nothing else to do while workers run) →
    `superagent events --wait 90` (short enough for any shell-tool timeout), handle what arrives, repeat. Stop when the user speaks.
 4. **Done for now** → `superagent router detach` (or just stop: after 15 quiet minutes the background
@@ -64,9 +66,12 @@ IDs: `T#n` an event, `TH#n` a thread (the local thread with the user, a GitHub i
 chat), `W#n` a worker. Long text is cut (`… [+N chars: recall T#n]`); use `superagent recall` for the rest.
 
 - **REPORT, status=done** → tell the user the result and the PR link. Without a PR the report names the
-  branch (local repos) or folder (scratch work); `superagent diff W#n` shows what changed, so you can
-  summarise it and tell the user how to pick it up (for example `git merge superagent/w4-…`). If its reply
-  thread is a GitHub or Telegram thread, also `superagent reply TH#n "…"` there.
+  branch (local repos) or folder (scratch work). `superagent result W#n` gives the worker's full answer
+  and the files it changed; `superagent diff W#n` the changes themselves. For a web page, look before you
+  say it works: `superagent preview W#n --width 375,1280` saves screenshots at phone and desktop width
+  (open them) and lists page errors. When the user wants local branches merged, `superagent merge W#4 W#5`
+  merges them in order into the repo folder's current branch (`--into main` to choose; it never pushes and
+  stops at a conflict). If its reply thread is a GitHub or Telegram thread, also `superagent reply TH#n "…"` there.
 - **REPORT, status=needs_input** → put the worker's exact question to the user, then send the answer
   with `superagent tell W#n "…"`. If it came from GitHub, ask there with `reply`.
 - **REPORT, status=no_change** → nothing needed changing (could not reproduce, already fixed); say so.
@@ -86,7 +91,7 @@ chat), `W#n` a worker. Long text is cut (`… [+N chars: recall T#n]`); use `sup
 ```bash
 superagent dispatch "<task>" [--agent claude|codex|opencode|cursor] [--repo web|owner/repo|.]
                              [--base feature-branch] [--title "Short title"] [--follow TH#8,TH#9]
-                             [--reply TH#8] [--silent]
+                             [--reply TH#8] [--silent] [--after W#2] [--verify syntax|tests|browser]
 superagent tell W#3 "<new instructions or information>" [--now]   # resumes with its memory; --now interrupts
 superagent cancel W#3 [--reason "…"]
 superagent reply TH#8 "<message>"                        # GitHub issue/PR comment, Telegram message
@@ -94,9 +99,14 @@ superagent ignore T#41 T#42 [--reason "…"]
 superagent recall T#42 TH#8 W#3                           # full objects, with the IDs they link to
 superagent follow W#3 TH#9 / superagent unfollow W#3 TH#9    # GitHub issues and PRs only
 superagent remember "<durable fact or preference>"     # memory / forget <id>
-superagent workers · superagent logs W#3 · superagent diff W#3 [--patch] · superagent graph
-superagent status · superagent activity
-superagent retry W#3 · superagent archive W#3 · superagent cleanup [--days 7]
+superagent workers · superagent result W#3 · superagent logs W#3 · superagent diff W#3 [--patch]
+superagent wait W#3 W#4 [--timeout 280]                  # block until they finish or need input
+superagent preview W#3 [page.html] [--width 375,1280] [--dark] [--full]   # screenshots + page errors
+superagent serve W#3                                      # local URL for the user; returns at once
+superagent merge W#3 W#4 [--into main]                    # local branches, in order; never pushes
+superagent events --again                                 # the last batch again, if output was cut off
+superagent graph · superagent status · superagent activity
+superagent retry W#3 · superagent archive W#3 · superagent cleanup [--days 7] [--dry-run]
 superagent repo add <path|owner/repo> [--mode mentions|all|off] [--allow alice,bob] · superagent repo list
 ```
 
@@ -130,11 +140,17 @@ A worker starts with nothing but your task text. Write it like a brief to a stro
 - for GitHub work, the issue or PR link, and `--follow` its thread so review comments and CI reach the
   worker directly.
 
-Say how to verify, in proportion to the task ("a syntax check is enough", "run the unit tests", "no
-browser needed"). Workers otherwise tend to test everything, which is slow, and some tools (browsers,
-GUIs) can't run in an agent's sandbox. If `superagent workers` shows a worker going in circles, redirect
-it with `superagent tell W#n "…" --now`, which interrupts its run; without `--now` the message waits
-until the run ends.
+Choose how it verifies, in proportion to the task: `--verify syntax`, `--verify tests`, or
+`--verify browser` for anything people look at (the worker screenshots it at phone and desktop width).
+Workers otherwise tend to test everything, which is slow. Its report says what it verified.
+
+When a task needs another worker's result, `--after W#n` starts it once W#n is done (in the same repo it
+builds on W#n's branch); it fails if W#n fails.
+
+Prefer plain `tell`: the worker reads it when its current run ends. Use `--now` only when a worker is going
+in circles: it interrupts the run, and the step in progress is redone (a large file half-written is lost).
+For the same reason, a restart of SuperAgent while workers run asks first; `superagent restart --when-idle`
+waits for them.
 
 Don't split a task into steps; the worker plans. One worker per independent task. Follow-ups, corrections
 or a change of plan for an existing task go to that worker with `tell`, even if they arrive from another
@@ -151,8 +167,8 @@ unpushed commits or uncommitted changes. In a local-only repo, from the last com
 so it does not see uncommitted changes. If the task depends on them, ask the user to commit (and push),
 or describe the changes in the task. To build on a branch other than the default, pass `--base <branch>`.
 
-`dispatch` says when a worker is **queued** (all slots busy, or too little free memory); it starts by
-itself once a slot is free and there is enough memory.
+`dispatch` says when a worker is **queued** and why (all slots busy, too little free memory, or waiting
+for `--after`); it starts by itself when it can.
 
 ## Rules
 

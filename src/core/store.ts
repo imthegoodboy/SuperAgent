@@ -62,6 +62,8 @@ export interface WorkerRow {
   last_activity_at: number;
   run_count: number;
   archived: number;
+  /** Start only after this worker is done (dispatch --after). */
+  after_worker: number | null;
 }
 
 export interface RunRow {
@@ -151,6 +153,7 @@ CREATE TABLE IF NOT EXISTS worker_runs (
 CREATE TABLE IF NOT EXISTS worker_logs (
   id INTEGER PRIMARY KEY, worker_id INTEGER NOT NULL, run_id INTEGER, ts INTEGER NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS worker_logs_worker ON worker_logs(worker_id, id);
+CREATE INDEX IF NOT EXISTS worker_runs_worker ON worker_runs(worker_id);
 CREATE TABLE IF NOT EXISTS subscriptions (
   worker_id INTEGER NOT NULL, thread_id INTEGER NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (worker_id, thread_id));
 CREATE TABLE IF NOT EXISTS inbox (
@@ -178,6 +181,12 @@ export class Store {
     this.db = new DatabaseSync(file);
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA synchronous = NORMAL;');
     this.db.exec(SCHEMA);
+    // Columns added after the first release (an existing database keeps its data).
+    try {
+      this.db.exec('ALTER TABLE workers ADD COLUMN after_worker INTEGER');
+    } catch (e) {
+      if (!/duplicate column/i.test((e as Error).message)) throw e;
+    }
     this.upsertThread({ key: LOCAL_THREAD_KEY, source: 'local', title: 'Local chat', subscribable: false });
   }
 
@@ -324,13 +333,14 @@ export class Store {
     origin_trigger_id?: number | null;
     silent?: boolean;
     base?: string | null;
+    after_worker?: number | null;
     created_by: string;
   }): WorkerRow {
     const now = Date.now();
     const { id } = this.run(
-      `INSERT INTO workers (title, task, agent, model, repo, base, status, reply_thread_id, origin_trigger_id, silent, created_by, created_at, updated_at, last_activity_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)`,
-      w.title, w.task, w.agent, w.model ?? null, w.repo ?? null, w.base ?? null, w.reply_thread_id ?? null, w.origin_trigger_id ?? null,
+      `INSERT INTO workers (title, task, agent, model, repo, base, after_worker, status, reply_thread_id, origin_trigger_id, silent, created_by, created_at, updated_at, last_activity_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)`,
+      w.title, w.task, w.agent, w.model ?? null, w.repo ?? null, w.base ?? null, w.after_worker ?? null, w.reply_thread_id ?? null, w.origin_trigger_id ?? null,
       w.silent ? 1 : 0, w.created_by, now, now, now,
     );
     return this.workerById(id)!;

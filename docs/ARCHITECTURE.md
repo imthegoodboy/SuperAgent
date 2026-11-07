@@ -115,6 +115,19 @@ started for, so it can't restart in a loop; any output from an agent, even witho
 activity for the stall check,
 and a run ends when its process exits even if a leftover child still holds the output pipe.
 
+A queued worker waits for one of three things, and `dispatch`, `workers` and `status` say which: a free
+slot (`workers.maxConcurrent`), enough free memory (`workers.minFreeMemoryMB`, checked only while another
+worker runs), or the worker it was dispatched `--after` (a `W#n`; stored on the worker). A dependent in the same
+repo starts from its dependency's branch, and fails at once if the dependency fails or is stopped. After a
+restart, each interrupted worker's log says so; it resumes from its agent session, but the step in
+progress is redone, so `superagent restart` asks first while workers run (`--when-idle` waits).
+
+`superagent preview` renders a page in the installed Chrome, Edge or Chromium (`SUPERAGENT_BROWSER`
+overrides), over the DevTools protocol through Node's built-in WebSocket: it serves the folder on
+127.0.0.1, emulates the device width (headless windows on Windows can't be narrower than about 500 px),
+saves PNGs under the data folder's `previews/`, and collects exceptions, `console.error` and failed
+loads. Workers can run it too; `--verify browser` asks them to.
+
 **Acting ahead (3.4):** the router can dispatch with `silent: true`. A silent worker's result is only
 announced if it reports `done`. Otherwise its report is dropped by the fast path in code, so neither
 router is asked to announce it. It is still on the worker and in `superagent activity`. The default policy uses this for

@@ -29,8 +29,8 @@ export async function health(timeoutMs = 2000): Promise<{ ok: boolean; version: 
 
 export async function api<T = any>(method: string, path: string, body?: unknown): Promise<T> {
   let res: Response;
-  try {
-    res = await fetch(`${baseUrl()}${path}`, {
+  const send = () =>
+    fetch(`${baseUrl()}${path}`, {
       method,
       headers: {
         authorization: `Bearer ${token()}`,
@@ -40,6 +40,17 @@ export async function api<T = any>(method: string, path: string, body?: unknown)
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
+  try {
+    try {
+      res = await send();
+    } catch (e) {
+      // A reused connection the service had just closed. Asking again is safe only for a pure read:
+      // not for changes, and not for `events`, which hands its batch out as it answers.
+      const code = (e as { cause?: { code?: string } })?.cause?.code ?? '';
+      const handsOut = path.startsWith('/api/router/events') && !/[?&](peek|again)=/.test(path);
+      if (method !== 'GET' || handsOut || !['ECONNRESET', 'UND_ERR_SOCKET'].includes(code)) throw e;
+      res = await send();
+    }
   } catch (e) {
     const code = (e as { cause?: { code?: string } })?.cause?.code;
     if (code === 'ECONNREFUSED') throw new Error('SuperAgent is not running. Start it with `superagent start`.');

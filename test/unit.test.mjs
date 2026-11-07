@@ -67,6 +67,15 @@ test('opencode and cursor parsers', () => {
   assert.deepEqual(c('{"type":"result","is_error":false,"result":"ok"}'), [{ kind: 'final', text: 'ok' }]);
 });
 
+test('sign-in checks: a stale Cursor login is not signed in', () => {
+  assert.equal(cursor.auth.signedIn('Logged in as a@b.c'), true);
+  // `cursor-agent status` exits 0 with this, yet every task fails with "Authentication required".
+  assert.equal(cursor.auth.signedIn('✓ Logged in (unable to fetch user details)'), false);
+  assert.equal(cursor.auth.signedIn('Not logged in'), false);
+  assert.equal(claude.auth.signedIn('{"loggedIn": true}'), true);
+  assert.equal(claude.auth.signedIn('{"loggedIn": false}'), false);
+});
+
 test('windows cmd shim resolution', () => {
   const exe = parseCmdShim('"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"   %*', 'C:\\npm\\claude.cmd');
   assert.equal(exe.via, 'exe');
@@ -122,6 +131,8 @@ test('worker report parsing', () => {
   assert.equal(r.pr_url, 'https://github.com/a/b/pull/12');
   assert.equal(parseReport('no block here'), null);
   assert.equal(parseReport('<superagent-report>{"status":"needs_input","summary":"?","question":"Which DB?"}</superagent-report>').question, 'Which DB?');
+  assert.equal(parseReport('<superagent-report>{"status":"done","summary":"ok","verified":"12 tests pass"}</superagent-report>').verified, '12 tests pass');
+  assert.equal(r.verified, null);
 });
 
 test('router action normalisation', () => {

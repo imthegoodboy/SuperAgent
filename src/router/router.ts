@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { run } from '../agents/process.js';
 import type { App } from '../daemon/app.js';
 import { AGENT_IDS, type AgentId } from '../core/config.js';
 import { paths } from '../core/paths.js';
@@ -24,7 +25,7 @@ Each turn brings a batch of events. Objects have IDs: T#n = trigger (an incoming
 OUTPUT
 Reply with JSON only: {"actions":[...]}. Action types:
 - {"type":"reply","thread":"TH#1","text":"..."}: send a message to a thread.
-- {"type":"dispatch","title":"short title","task":"complete, self-contained instructions","repo":"repo name (optional)","agent":"claude|codex|opencode|cursor (optional)","threads":["TH#8"],"reply_thread":"TH#1","silent":false}: start a new Worker. "threads" = GitHub threads the worker should follow (their new events go straight to it). "reply_thread" = where results should be reported.
+- {"type":"dispatch","title":"short title","task":"complete, self-contained instructions","repo":"repo name (optional)","agent":"claude|codex|opencode|cursor (optional)","threads":["TH#8"],"reply_thread":"TH#1","silent":false,"base":"branch (optional)","after":"W#3 (optional)","verify":"syntax|tests|browser (optional)"}: start a new Worker. "threads" = GitHub threads the worker should follow (their new events go straight to it). "reply_thread" = where results should be reported. "base" = branch to start from (default: the repo's default branch). "after" = start only when that worker is done. "verify" = how the worker checks its work (browser for anything visual).
 - {"type":"message_worker","worker":"W#3","text":"...","now":false}: forward new instructions or information to an existing worker (it resumes with full memory of its task). "now":true interrupts a run in progress (a change of plan, or a worker going in circles); otherwise the message waits until the current run ends.
 - {"type":"stop_worker","worker":"W#3","reason":"..."}
 - {"type":"subscribe","worker":"W#3","thread":"TH#9"} and {"type":"unsubscribe","worker":"W#3","thread":"TH#9"}
@@ -66,6 +67,8 @@ export const ROUTER_SCHEMA = {
           worker: { type: 'string' },
           now: { type: 'boolean' },
           base: { type: 'string' },
+          after: { type: 'string' },
+          verify: { type: 'string' },
           reason: { type: 'string' },
           ids: { type: 'array', items: { type: 'string' } },
           triggers: { type: 'array', items: { type: 'string' } },
@@ -375,6 +378,24 @@ export class Router {
     }
   }
 
+  /** What `events` would hand out now, without handing anything out (`events --peek`). */
+  pendingText(owner: string | null): string {
+    this.checkOwner(owner);
+    const { store } = this.app;
+    const since = Number(store.getKv('router.awaySince') ?? 0);
+    const away = since ? renderAway(this.app, since) || null : null;
+    return renderEvents(this.app, store.pendingRouterTriggers(this.app.config.router.maxBatch), store.unseenFyi(), [...this.notes], away);
+  }
+
+  /** The last batch handed to an attached agent, again (`events --again`), for output that was cut off. */
+  lastBatch(owner: string | null): string {
+    this.checkOwner(owner);
+    const t = this.app.store.get<{ input: string }>(
+      "SELECT input FROM router_turns WHERE session = 'attached agent' AND input != '[actions from the attached agent]' ORDER BY id DESC LIMIT 1",
+    );
+    return t?.input ?? 'No batch has been handed out yet.';
+  }
+
   /** Actions from the attached agent: the same action types the background router emits. */
   async act(actions: Action[], owner: string | null, who: string | null = null): Promise<{ results: ActionResult[]; away_pending: boolean }> {
     const { store } = this.app;
@@ -674,6 +695,29 @@ export class Router {
           }
         }
         if (a.base && !repo) throw new Error('--base needs a repository (--repo)');
+        // Check the branch now, while the router is listening, not minutes later when a slot frees up.
+        if (a.base && repo) {
+          const dir = repo.path ?? (repo.slug ? path.join(paths.repos, ...repo.slug.split('/')) : '');
+          if (dir && fs.existsSync(path.join(dir, '.git'))) {
+            const b = String(a.base).trim();
+            const has = async (r: string) => (await run('git', ['-C', dir, 'rev-parse', '--verify', '--quiet', r])).code === 0;
+            let ok = (await has(`refs/heads/${b}`)) || (await has(`refs/remotes/origin/${b.replace(/^origin\//, '')}`));
+            // Not fetched yet? Ask GitHub (the worker fetches before it starts). Exit code 2 means "no such branch";
+            // anything else (offline, no remote) leaves the check to the worker's own setup.
+            if (!ok && repo.slug) {
+              // The full ref name: ls-remote matches the end of ref names, so "feature" would also match "team/feature".
+              const r = await run('git', ['-C', dir, 'ls-remote', '--exit-code', 'origin', `refs/heads/${b.replace(/^origin\//, '')}`], { timeoutMs: 20_000 });
+              ok = r.code !== 2;
+            }
+            if (!ok) throw new Error(`base "${b}" is not a branch in ${repo.name}`);
+          }
+        }
+        const after = a.after ? parseRefOf('W', a.after) : null;
+        if (a.after) {
+          const dep = after ? store.workerById(after) : undefined;
+          if (!dep) throw new Error(`unknown worker ${a.after} for --after`);
+          if (['failed', 'stopped'].includes(dep.status)) throw new Error(`${ref.W(dep.id)} ended ${dep.status}; nothing to wait for`);
+        }
         const requested = String(a.agent ?? '').toLowerCase();
         if (by === 'agent' && requested && !this.app.availableAgents().includes(requested as AgentId)) {
           throw new Error(`agent "${requested}" is not available. Available: ${this.app.availableAgents().join(', ') || 'none'}`);
@@ -682,9 +726,15 @@ export class Router {
           (AGENT_IDS as readonly string[]).includes(requested) || requested === 'mock' ? (requested as AgentId) : undefined,
           repo?.agent,
         );
+        const verify = String(a.verify ?? '').trim();
+        const VERIFY: Record<string, string> = {
+          syntax: 'Verify with a syntax check only (for example `node --check`); no browser, server or test runs.',
+          tests: "Verify by running the project's tests (add tests for what you change).",
+          browser: 'Verify in a browser: run `superagent preview <file> --width 375` and `--width 1280`, look at both screenshots, and fix what looks wrong or errors.',
+        };
         const w = workers.create({
           title: String(a.title ?? '').trim() || snippet(task, 60),
-          task,
+          task: verify ? `${task}\n\nVerification: ${VERIFY[verify] ?? verify}` : task,
           agent,
           repo: repo?.name ?? null,
           threads,
@@ -692,13 +742,17 @@ export class Router {
           originTriggerId: origin?.id ?? null,
           silent: !!a.silent,
           base: typeof a.base === 'string' && a.base.trim() ? a.base.trim() : null,
+          after,
           createdBy: 'router',
         });
         if (requested && requested !== agent) this.note(`${ref.W(w.id)} uses ${agent} because ${requested} is not available.`);
         const now = store.workerById(w.id)!;
+        const waiting = workers.queueReason(now);
         return {
           worker: ref.W(w.id),
-          status: now.status, // "queued" when every slot is busy
+          status: now.status, // "queued" when it has to wait
+          waiting_for: waiting?.reason ?? null,
+          waiting_detail: waiting?.detail ?? null,
           running: workers.runningCount,
           max: this.app.config.workers.maxConcurrent,
           agent,
@@ -715,9 +769,11 @@ export class Router {
         if (!id || !store.workerById(id)) throw new Error(`unknown worker ${a.worker}`);
         if (!String(a.text ?? '').trim()) throw new Error('message_worker needs text');
         // `now`: interrupt the run in progress and resume it with this message, instead of queueing it.
-        if (a.now && workers.isActive(id) && workers.restartRun(id, String(a.text), 'router')) return { worker: ref.W(id), interrupted: true };
+        const wasRunning = workers.isActive(id);
+        const runningFor = wasRunning ? Date.now() - (store.get<{ started_at: number }>("SELECT started_at FROM worker_runs WHERE worker_id = ? AND status = 'running' ORDER BY id DESC LIMIT 1", id)?.started_at ?? Date.now()) : 0;
+        if (a.now && wasRunning && workers.restartRun(id, String(a.text), 'router')) return { worker: ref.W(id), interrupted: true, was_running: true, discarded_ms: runningFor };
         workers.message(id, 'router', String(a.text));
-        return { worker: ref.W(id), interrupted: false };
+        return { worker: ref.W(id), interrupted: false, was_running: wasRunning, status: store.workerById(id)?.status };
       }
       case 'stop_worker': {
         const id = parseRefOf('W', a.worker);
