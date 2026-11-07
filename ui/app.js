@@ -1,4 +1,4 @@
-import { clear, connect, h, icon, listen } from './lib.js';
+import { api, clear, connect, h, icon, listen, token } from './lib.js';
 import { activeWorkers, loadAll, state } from './state.js';
 import chatView from './views/chat.js';
 import tasksView from './views/tasks.js';
@@ -56,7 +56,7 @@ let current = null;
 
 function route() {
   const [, name = 'chat', arg] = location.hash.replace(/^#/, '').split('/');
-  const key = VIEWS[name] ? name : 'chat';
+  const key = Object.hasOwn(VIEWS, name) ? name : 'chat';
   for (const a of nav.querySelectorAll('a')) a.classList.toggle('active', a.dataset.view === key);
   if (current?.key === key && current.update) {
     current.update(arg);
@@ -64,32 +64,71 @@ function route() {
   }
   current?.unmount?.();
   clear(view);
-  const api = VIEWS[key].mount(view, arg) ?? {};
-  current = { key, ...api };
+  const viewApi = VIEWS[key].mount(view, arg) ?? {};
+  current = { key, ...viewApi };
   document.title = `${VIEWS[key].label} · SuperAgent`;
 }
 
-let wasConnected = false;
-listen((type) => {
-  if (type === 'hello') {
-    // First connect, or the daemon restarted: reload everything and redraw.
-    loadAll()
-      .then(() => {
-        renderFoot();
-        if (wasConnected || !current) {
-          current?.unmount?.();
-          current = null;
-          route();
-        }
-        wasConnected = true;
-      })
-      .catch(console.error);
+function message(title, ...body) {
+  current?.unmount?.();
+  current = null;
+  clear(view, h('div', { class: 'empty center' }, h('h1', {}, title), ...body.map((b) => h('p', { class: 'muted' }, b))));
+}
+
+function locked() {
+  message('Open SuperAgent from the app', [
+    'This page needs your local access key. Open SuperAgent from the desktop app, or run ',
+    h('code', {}, 'superagent open'),
+    ' in a terminal.',
+  ]);
+}
+
+let loaded = false;
+let daemonId = null;
+let es = null;
+
+async function load(server) {
+  try {
+    await loadAll();
+  } catch (e) {
+    if (e.status === 401) {
+      es?.close();
+      return locked();
+    }
+    message('Could not load SuperAgent', e.message, 'Retrying…');
+    setTimeout(() => load(server), 3000);
     return;
+  }
+  renderFoot();
+  // Redraw on first load and when the daemon restarted; a plain reconnect keeps the page (and drafts).
+  const id = `${server?.pid}:${server?.startedAt}`;
+  if (!loaded || id !== daemonId) {
+    loaded = true;
+    daemonId = id;
+    current?.unmount?.();
+    current = null;
+    route();
+  }
+}
+
+listen((type, data) => {
+  if (type === 'hello') return void load(data);
+  if (type === 'disconnected' && !loaded) {
+    // Never connected: tell a wrong key apart from a daemon that is down.
+    api('GET', '/api/state').catch((e) => {
+      if (e.status === 401) {
+        es?.close();
+        locked();
+      }
+    });
   }
   if (['router', 'worker', 'disconnected', 'agents'].includes(type)) renderFoot();
 });
 
-window.addEventListener('hashchange', route);
+window.addEventListener('hashchange', () => loaded && route());
 renderFoot();
-clear(view, h('div', { class: 'empty center' }, h('p', { class: 'muted' }, 'Connecting to SuperAgent…')));
-connect();
+if (!token) locked();
+else {
+  message('Connecting to SuperAgent…');
+  es = connect();
+}

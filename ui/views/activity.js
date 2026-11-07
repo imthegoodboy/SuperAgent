@@ -88,8 +88,12 @@ export default function activityView(el) {
         class: 'btn',
         type: 'button',
         onclick: async () => {
-          await api('POST', '/api/router/reset');
-          toast('Router session restarted');
+          try {
+            await api('POST', '/api/router/reset');
+            toast('Router session restarted');
+          } catch (e) {
+            toast(e.message, 'bad');
+          }
         },
       },
       icon('retry', 16),
@@ -148,37 +152,56 @@ export default function activityView(el) {
     );
   }
 
+  const LOADERS = { Events: showEvents, Router: showRouter, Watchdog: showWatchdog };
+  let pending = null;
+
+  function load(forTab) {
+    if (forTab !== tab) return;
+    LOADERS[forTab]().catch((e) => {
+      if (forTab === tab) clear(body, h('div', { class: 'empty' }, h('p', {}, e.message)));
+    });
+  }
+
+  // Debounced refresh that never paints into a tab the user has since left.
+  function refreshSoon(forTab, ms) {
+    clearTimeout(pending);
+    pending = setTimeout(() => load(forTab), ms);
+  }
+
   function show() {
+    clearTimeout(pending);
     for (const b of seg.children) b.setAttribute('aria-selected', String(b.dataset.tab === tab));
     intro.textContent = INTRO[tab];
-    const fn = tab === 'Events' ? showEvents : tab === 'Router' ? showRouter : showWatchdog;
-    fn().catch((e) => clear(body, h('div', { class: 'empty' }, h('p', {}, e.message))));
+    load(tab);
   }
 
   for (const t of tabs) seg.append(h('button', { type: 'button', role: 'tab', 'data-tab': t, onclick: () => ((tab = t), show()) }, t));
   show();
 
-  let pending = null;
   const off = listen((type, data) => {
     if (tab === 'Events' && type === 'trigger' && data) {
       const existing = rows.get(data.id);
-      if (data.thread_id && !threads[data.thread_id]) {
-        clearTimeout(pending);
-        pending = setTimeout(showEvents, 300);
-        return;
-      }
+      if (data.thread_id && !threads[data.thread_id]) return refreshSoon('Events', 300);
       const r = eventRow(data);
       rows.set(data.id, r);
       const list = body.querySelector('.ev-list');
       if (existing) existing.replaceWith(r);
-      else if (list) list.prepend(r);
-      else showEvents();
+      else if (list) {
+        list.prepend(r);
+        while (list.children.length > 200) {
+          const last = list.lastElementChild;
+          for (const [id, el] of rows) if (el === last) rows.delete(id);
+          last.remove();
+        }
+      } else refreshSoon('Events', 0);
     }
-    if (tab === 'Router' && (type === 'router_turn' || type === 'router')) {
-      clearTimeout(pending);
-      pending = setTimeout(showRouter, 400);
-    }
-    if (tab === 'Watchdog' && type === 'watchdog') showWatchdog();
+    if (tab === 'Router' && (type === 'router_turn' || type === 'router')) refreshSoon('Router', 400);
+    if (tab === 'Watchdog' && type === 'watchdog') refreshSoon('Watchdog', 0);
   });
-  return { unmount: off };
+  return {
+    unmount: () => {
+      clearTimeout(pending);
+      off();
+    },
+  };
 }

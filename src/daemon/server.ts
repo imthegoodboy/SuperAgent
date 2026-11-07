@@ -64,7 +64,7 @@ route('POST', '/api/messages', ({ app, body }) => {
 });
 
 route('GET', '/api/workers', ({ app, query }) =>
-  app.store.listWorkers(query.get('archived') === '1').map((w) =>
+  app.store.listWorkers(query.get('archived') === 'only' ? 'archived' : query.get('archived') === '1' ? 'all' : 'current').map((w) =>
     // Active workers carry their recent event kinds so the UI can draw activity tracks right away.
     ['queued', 'running', 'waiting'].includes(w.status)
       ? { ...w, ticks: app.store.tailLogs(w.id, 48).map((l) => l.kind) }
@@ -288,8 +288,7 @@ function serveStatic(app: App, pathname: string, res: http.ServerResponse): void
     if (!path.extname(rel)) return serveStatic(app, '/', res);
     return send(res, 404, 'not found');
   }
-  let data: string | Buffer = fs.readFileSync(file);
-  if (rel === 'index.html') data = data.toString('utf8').replace('__SA_TOKEN__', app.token);
+  const data = fs.readFileSync(file);
   res.writeHead(200, {
     'content-type': MIME[path.extname(file)] ?? 'application/octet-stream',
     'cache-control': 'no-store',

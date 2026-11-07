@@ -61,7 +61,7 @@ try {
     const page = await browser.newPage({ viewport: opts.viewport ?? { width: 1360, height: 860 }, colorScheme: opts.dark ? 'dark' : 'light' });
     page.on('pageerror', (e) => errors.push(`${name}: ${e.message}`));
     page.on('console', (m) => m.type() === 'error' && errors.push(`${name}: console: ${m.text()}`));
-    await page.goto(base + url);
+    await page.goto(`${base}/?t=${token}${url.slice(1)}`);
     if (opts.wait) await page.waitForSelector(opts.wait, { timeout: 10_000 });
     if (opts.act) await opts.act(page);
     await sleep(600);
@@ -80,11 +80,19 @@ try {
   await shoot('new-task', '/#/tasks', { wait: '.pane-head', act: (p) => p.getByRole('button', { name: 'New task' }).click() });
   await shoot('phone', '/#/chat', { wait: '.msg-agent', viewport: { width: 390, height: 780 } });
 
+  // Without the key the app explains how to open it instead of failing silently.
+  const lockedPage = await browser.newPage();
+  await lockedPage.goto(base + '/#/chat');
+  await lockedPage.waitForSelector('text=Open SuperAgent from the app', { timeout: 10_000 });
+  await lockedPage.screenshot({ path: path.join(out, 'locked.png') });
+  await lockedPage.close();
+
   // Interaction: sending a message from the UI reaches the router and comes back.
   const page = await browser.newPage();
   page.on('pageerror', (e) => errors.push(`interaction: ${e.message}`));
-  await page.goto(base + '/#/chat');
+  await page.goto(`${base}/?t=${token}#/chat`);
   await page.waitForSelector('.composer textarea');
+  if (page.url().includes('?t=')) throw new Error('token was left in the address bar');
   await page.fill('.composer textarea', 'ping from the UI test');
   await page.keyboard.press('Enter');
   await page.waitForSelector('text=Echo: ping from the UI test', { timeout: 10_000 });

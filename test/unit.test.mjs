@@ -89,6 +89,14 @@ test('windows cmd shim resolution', () => {
   assert.equal(parseCmdShim('@echo off\necho hi', 'C:\\x\\y.cmd'), null);
 });
 
+test('a process that cannot be spawned settles instead of hanging', async () => {
+  const { startProcess } = await import('../dist/agents/process.js');
+  const h = startProcess({ file: 'definitely-not-a-real-binary-xyz', prefix: [], via: 'plain', path: '' }, { cwd: process.cwd(), args: [] });
+  const r = await Promise.race([h.done, new Promise((res) => setTimeout(() => res('hung'), 5000))]);
+  assert.notEqual(r, 'hung');
+  assert.ok(r.spawnError);
+});
+
 test('worker report parsing', () => {
   const r = parseReport('All good.\n<superagent-report>{"status":"done","summary":"Fixed it","pr_url":"https://github.com/a/b/pull/12"}</superagent-report>');
   assert.equal(r.status, 'done');

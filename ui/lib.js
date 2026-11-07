@@ -1,6 +1,26 @@
 // Small helpers shared by every view: API, live events, DOM building, markdown, formatting.
 
-export const token = document.querySelector('meta[name="sa-token"]')?.content ?? '';
+// The desktop app and `superagent open` pass the API token once as ?t=…; we keep it in this
+// browser's storage and drop it from the address bar. The served page itself contains no secret.
+function readToken() {
+  const fromUrl = new URLSearchParams(location.search).get('t');
+  if (fromUrl) {
+    try {
+      localStorage.setItem('sa-token', fromUrl);
+    } catch {
+      /* storage blocked: keep it for this page only */
+    }
+    history.replaceState(null, '', location.pathname + location.hash);
+    return fromUrl;
+  }
+  try {
+    return localStorage.getItem('sa-token') ?? '';
+  } catch {
+    return '';
+  }
+}
+
+export const token = readToken();
 
 export async function api(method, path, body) {
   const res = await fetch(path, {
@@ -9,7 +29,11 @@ export async function api(method, path, body) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(json.error || `Request failed (${res.status})`);
+  if (!res.ok) {
+    const err = new Error(json.error || `Request failed (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
   return json;
 }
 

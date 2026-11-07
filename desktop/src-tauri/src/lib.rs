@@ -7,7 +7,7 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -59,10 +59,19 @@ fn shell(cmd: &str) -> Command {
 
 #[cfg(not(windows))]
 fn shell(cmd: &str) -> Command {
-    // Apps started from Finder or a desktop launcher don't get the shell PATH; use a login shell.
+    // Apps started from Finder or a desktop launcher don't get the shell PATH. An interactive
+    // login shell also reads .zshrc/.bashrc, where version managers like nvm add Node to PATH.
     let mut c = Command::new(std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()));
-    c.args(["-lc", cmd]);
+    c.args(["-ilc", cmd]);
     c
+}
+
+/// The local API token. The page stores it and removes it from the address bar.
+fn token() -> String {
+    data_dir()
+        .and_then(|d| std::fs::read_to_string(d.join("token")).ok())
+        .map(|t| t.trim().to_string())
+        .unwrap_or_default()
 }
 
 fn cli_installed() -> bool {
@@ -87,8 +96,18 @@ fn connect(window: WebviewWindow) {
         if !cli_installed() {
             return show_error(&window, "The superagent command was not found.", INSTALL_HELP);
         }
-        if let Err(e) = shell("superagent start").spawn() {
-            return show_error(&window, "Could not start SuperAgent.", &e.to_string());
+        // `superagent start` launches the background service and returns once it is healthy.
+        // No pipes: the long-lived service could inherit them and keep this call waiting forever.
+        match shell("superagent start").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status() {
+            Ok(status) if !status.success() => {
+                return show_error(
+                    &window,
+                    "SuperAgent could not start.",
+                    "Run `superagent doctor` in a terminal to see what is missing,\nor check ~/.superagent/logs/daemon.log.",
+                );
+            }
+            Err(e) => return show_error(&window, "Could not start SuperAgent.", &e.to_string()),
+            Ok(_) => {}
         }
         let deadline = Instant::now() + Duration::from_secs(40);
         while !healthy(port) {
@@ -102,7 +121,7 @@ fn connect(window: WebviewWindow) {
             thread::sleep(Duration::from_millis(400));
         }
     }
-    if let Ok(url) = Url::parse(&format!("http://127.0.0.1:{port}/")) {
+    if let Ok(url) = Url::parse(&format!("http://127.0.0.1:{port}/?t={}", token())) {
         let _ = window.navigate(url);
     }
 }

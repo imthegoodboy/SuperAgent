@@ -42,6 +42,8 @@ export default function settingsView(el) {
   let cfg = state.config;
   let system = null;
 
+  // Redraw after every save so fields show what was actually stored (clamped numbers,
+  // sections that appear or disappear with a toggle).
   async function save(patch, msg = 'Saved') {
     try {
       cfg = state.config = await api('PUT', '/api/config', patch);
@@ -49,6 +51,7 @@ export default function settingsView(el) {
     } catch (e) {
       toast(e.message, 'bad');
     }
+    render();
   }
 
   function agentsSection() {
@@ -114,7 +117,8 @@ export default function settingsView(el) {
         toast(err.message, 'bad');
       }
     };
-    const updateRepo = (name, patch) => save({ repos: cfg.repos.map((r) => (r.name === name ? { ...r, ...patch } : r)) });
+    // Start from the live config: repos may have been added from the CLI meanwhile.
+    const updateRepo = (name, patch) => save({ repos: (state.config ?? cfg).repos.map((r) => (r.name === name ? { ...r, ...patch } : r)) });
     return h(
       'section',
       { class: 'set-section' },
@@ -140,8 +144,13 @@ export default function settingsView(el) {
                     type: 'button',
                     title: `Remove ${r.name}`,
                     onclick: async () => {
-                      await api('DELETE', `/api/repos/${encodeURIComponent(r.name)}`);
-                      cfg = state.config = await api('GET', '/api/config');
+                      try {
+                        await api('DELETE', `/api/repos/${encodeURIComponent(r.name)}`);
+                        cfg = state.config = await api('GET', '/api/config');
+                        toast(`Removed ${r.name}`);
+                      } catch (e) {
+                        toast(e.message, 'bad');
+                      }
                       render();
                     },
                   },
@@ -197,7 +206,12 @@ export default function settingsView(el) {
       ),
       tg.enabled
         ? [
-            row('Bot token', null, text(tg.botToken, (v) => save({ telegram: { botToken: v } }), { type: 'password', placeholder: '123456:ABC…', label: 'Bot token' })),
+            row(
+              'Bot token',
+              tg.botToken ? 'Saved. Paste a new token to replace it.' : null,
+              // Never prefill the masked token: typing next to it would look like an edit but be ignored.
+              text('', (v) => v && save({ telegram: { botToken: v } }, 'Token saved'), { type: 'password', placeholder: tg.botToken || '123456:ABC…', label: 'Bot token' }),
+            ),
             row('Your Telegram username', 'Direct messages from these users are answered.', text(tg.allowUsers.join(', '), (v) => save({ telegram: { allowUsers: list(v) } }), { placeholder: 'username', label: 'Telegram users' })),
             h(
               'div',
@@ -209,7 +223,7 @@ export default function settingsView(el) {
                   { class: 'inline' },
                   h('code', {}, c.id),
                   select(MODES, c.mode, (v) => save({ telegram: { chats: tg.chats.map((x) => (x.id === c.id ? { ...x, mode: v } : x)) } }), 'Chat mode'),
-                  h('button', { class: 'btn btn-ghost', type: 'button', onclick: () => save({ telegram: { chats: tg.chats.filter((x) => x.id !== c.id) } }).then(render) }, icon('x', 16)),
+                  h('button', { class: 'btn btn-ghost', type: 'button', 'aria-label': `Remove chat ${c.id}`, onclick: () => save({ telegram: { chats: tg.chats.filter((x) => x.id !== c.id) } }) }, icon('x', 16)),
                 ),
               ),
               h(
@@ -219,7 +233,9 @@ export default function settingsView(el) {
                   onsubmit: (e) => {
                     e.preventDefault();
                     const id = chatId.value.trim();
-                    if (id) save({ telegram: { chats: [...tg.chats.filter((x) => x.id !== id), { id, mode: 'mentions' }] } }).then(render);
+                    if (!id) return;
+                    if (tg.chats.some((x) => x.id === id)) return toast('That chat is already added');
+                    save({ telegram: { chats: [...tg.chats, { id, mode: 'mentions' }] } });
                   },
                 },
                 chatId,

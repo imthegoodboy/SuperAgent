@@ -6,7 +6,7 @@ export function baseUrl(): string {
   return `http://127.0.0.1:${loadConfig().port}`;
 }
 
-function token(): string {
+export function token(): string {
   try {
     return fs.readFileSync(paths.token, 'utf8').trim();
   } catch {

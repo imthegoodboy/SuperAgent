@@ -485,7 +485,7 @@ select.input {
 }
 
 .when {
-  color: var(--faint);
+  color: var(--muted);
   font-size: 12px;
   margin-left: auto;
   white-space: nowrap;

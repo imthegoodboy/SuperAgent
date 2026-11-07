@@ -160,17 +160,24 @@ export function startProcess(resolved: Resolved, opts: ProcOptions): ProcHandle 
     : null;
 
   const done = new Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean; spawnError?: string }>((resolve) => {
-    child.on('error', (err) => {
-      spawnError = err.message;
-    });
-    child.on('close', (code) => {
+    let settled = false;
+    const settle = (code: number | null) => {
+      if (settled) return;
+      settled = true;
       if (timer) clearTimeout(timer);
       for (const stream of ['stdout', 'stderr'] as const) {
         if (bufs[stream].trim()) opts.onLine?.(bufs[stream].replace(/\r$/, ''), stream);
         bufs[stream] = '';
       }
       resolve({ code, stdout, stderr, timedOut, spawnError });
+    };
+    // A failed spawn (missing binary, out of memory) may emit 'error' without ever emitting 'close';
+    // settle anyway so a worker slot or the router can never hang on it.
+    child.on('error', (err) => {
+      spawnError = err.message;
+      setTimeout(() => settle(null), 1000);
     });
+    child.on('close', (code) => settle(code));
   });
 
   return { pid: child.pid, done, kill };

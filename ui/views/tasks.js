@@ -43,7 +43,11 @@ export default function tasksView(el, arg) {
 
   let archived = [];
   async function reloadList() {
-    archived = showArchived.checked ? (await api('GET', '/api/workers?archived=1')).filter((w) => w.archived) : [];
+    try {
+      archived = showArchived.checked ? await api('GET', '/api/workers?archived=only') : [];
+    } catch (e) {
+      toast(e.message, 'bad');
+    }
     renderList();
   }
 
@@ -93,7 +97,10 @@ export default function tasksView(el, arg) {
             class: 'btn',
             type: 'button',
             title: 'Remove the workspace folder. The branch and any pull request stay.',
-            onclick: () => call(`/api/workers/${w.id}/archive`, 'Archived').then(() => (location.hash = '#/tasks')),
+            onclick: async () => {
+              const ok = confirm(`Archive W#${w.id}? Its workspace folder is deleted, including uncommitted changes. Committed work on its branch and any pull request stay.`);
+              if (ok && (await call(`/api/workers/${w.id}/archive`, 'Archived'))) location.hash = '#/tasks';
+            },
           },
           icon('archive', 16),
           'Archive',
@@ -106,8 +113,10 @@ export default function tasksView(el, arg) {
     try {
       await api('POST', path);
       if (msg) toast(msg);
+      return true;
     } catch (e) {
       toast(e.message, 'bad');
+      return false;
     }
   }
 
@@ -152,6 +161,7 @@ export default function tasksView(el, arg) {
     try {
       d = await api('GET', `/api/workers/${id}`);
     } catch (e) {
+      if (selected !== id) return;
       return clear(detail, h('div', { class: 'empty center' }, h('p', {}, e.message)));
     }
     if (selected !== id) return;
@@ -212,7 +222,7 @@ export default function tasksView(el, arg) {
     const agent = h(
       'select',
       { class: 'input' },
-      h('option', { value: '' }, `Default (${AGENTS[state.config?.workers?.defaultAgent] ?? 'Claude Code'})`),
+      h('option', { value: '' }, 'Automatic'),
       agents.map((a) => h('option', { value: a.id }, a.label)),
     );
     const repo = h(
@@ -260,7 +270,8 @@ export default function tasksView(el, arg) {
 
   const off = listen((type, data) => {
     if (type === 'worker') {
-      renderList();
+      if (showArchived.checked && data?.archived) reloadList();
+      else renderList();
       if (data?.id === selected) refreshHeader();
     } else if (type === 'worker_log' && data?.worker_id === selected && logEl && data.id > lastLogId) {
       lastLogId = data.id;

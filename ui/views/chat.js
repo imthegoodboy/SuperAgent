@@ -134,19 +134,25 @@ export default function chatView(el) {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) submit(e);
   });
 
+  // Live messages that arrive while history is loading wait, so older messages always come first.
+  let pending = [];
   api('GET', '/api/messages?limit=200')
     .then((msgs) => {
-      if (!msgs.length) list.append((empty = emptyState()));
+      if (!msgs.length && !pending.length) list.append((empty = emptyState()));
       for (const m of msgs) add(m);
-      toBottom();
     })
-    .catch((e) => toast(e.message, 'bad'));
+    .catch((e) => toast(e.message, 'bad'))
+    .finally(() => {
+      for (const m of pending.sort((a, b) => a.id - b.id)) add(m); // add() skips ids already shown
+      pending = null;
+      toBottom();
+    });
   renderLanes();
   setThinking();
   input.focus();
 
   const off = listen((type, data) => {
-    if (type === 'message') add(data);
+    if (type === 'message') pending ? pending.push(data) : add(data);
     else if (type === 'router') setThinking();
     else if (type === 'worker') renderLanes();
   });
