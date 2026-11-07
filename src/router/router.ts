@@ -705,7 +705,8 @@ export class Router {
             // Not fetched yet? Ask GitHub (the worker fetches before it starts). Exit code 2 means "no such branch";
             // anything else (offline, no remote) leaves the check to the worker's own setup.
             if (!ok && repo.slug) {
-              const r = await run('git', ['-C', dir, 'ls-remote', '--exit-code', '--heads', 'origin', b.replace(/^origin\//, '')], { timeoutMs: 20_000 });
+              // The full ref name: ls-remote matches the end of ref names, so "feature" would also match "team/feature".
+              const r = await run('git', ['-C', dir, 'ls-remote', '--exit-code', 'origin', `refs/heads/${b.replace(/^origin\//, '')}`], { timeoutMs: 20_000 });
               ok = r.code !== 2;
             }
             if (!ok) throw new Error(`base "${b}" is not a branch in ${repo.name}`);

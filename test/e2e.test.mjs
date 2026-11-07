@@ -600,12 +600,16 @@ test('--after waits for another worker and builds on its branch; --verify reache
   assert.match(failed.error, new RegExp(`${broken.worker} ended failed`));
   assert.match((await act({ type: 'dispatch', task: 'x', after: broken.worker })).error, /ended failed; nothing to wait for/);
   // Stopping a dependency that never started is news for its dependents too.
+  // Both slots busy, so nothing else would trigger scheduling.
   const busy = await act({ type: 'dispatch', task: 'SLOW: hold a slot', title: 'Holder' });
+  const busy2 = await act({ type: 'dispatch', task: 'SLOW: hold the other slot', title: 'Holder 2' });
   const waiting = await act({ type: 'dispatch', task: 'never starts', title: 'Waiting dep', after: busy.worker });
   const last = await act({ type: 'dispatch', task: 'after the waiting one', title: 'Last', after: waiting.worker });
   await act({ type: 'stop_worker', worker: waiting.worker });
-  assert.match((await settled(last.worker, 'failed')).error, new RegExp(`${waiting.worker} ended stopped`));
-  await act({ type: 'stop_worker', worker: busy.worker });
+  const lastFailed = await settled(last.worker, 'failed');
+  assert.match(lastFailed.error, new RegExp(`${waiting.worker} ended stopped`));
+  assert.equal((await worker(busy.worker)).status, 'running', 'it failed while every slot was still busy');
+  for (const w of [busy, busy2]) await act({ type: 'stop_worker', worker: w.worker });
   assert.match((await act({ type: 'dispatch', task: 'x', after: 'W#9999' })).error, /unknown worker W#9999/);
 });
 
@@ -701,23 +705,28 @@ test('serve: the service serves a folder, so the command returns at once', async
   assert.match(await (await fetch(url)).text(), /served/);
   assert.equal(JSON.parse(sa(['serve', site, '--json']).stdout).url, url, 'the same folder keeps its URL');
   assert.match(sa(['serve']).stdout, /served-site/);
-  assert.match(sa(['serve', '--stop']).stdout, /Stopped serving .*served-site/);
+  assert.match(sa(['serve', path.join(site, 'index.html'), '--stop']).stdout, /Stopped serving .*served-site/, 'a file stops its folder');
   await assert.rejects(fetch(url));
+  assert.match(sa(['serve', '--stop']).stdout, /Nothing was being served/);
 });
 
 test('a worker that waits for memory says so, with the numbers', async () => {
   await call('POST', '/api/router/attach', { take: true });
   await call('PUT', '/api/config', { workers: { minFreeMemoryMB: 1_000_000 } });
+  const started = [];
   try {
     const first = await act({ type: 'dispatch', task: 'SLOW: the one that always runs', title: 'Runs anyway' });
+    started.push(first.worker);
     assert.equal(first.status, 'running', 'one worker always runs');
     const second = await act({ type: 'dispatch', task: 'waits', title: 'Waits for memory' });
+    started.push(second.worker);
     assert.equal(second.status, 'queued');
     assert.equal(second.waiting_for, 'memory');
     assert.match(second.waiting_detail, /^\d+ MB free, needs 1000000 MB \(workers\.minFreeMemoryMB\)$/);
     assert.match(sa(['status']).stdout, new RegExp(`${second.worker} queued: \\d+ MB free, needs 1000000 MB`));
-    for (const w of [first, second]) await act({ type: 'stop_worker', worker: w.worker });
   } finally {
+    // Whatever happened above, leave nothing running for the next tests.
+    for (const w of started) await act({ type: 'stop_worker', worker: w });
     await call('PUT', '/api/config', { workers: { minFreeMemoryMB: 0 } });
   }
 });

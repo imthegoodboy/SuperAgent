@@ -190,7 +190,8 @@ export class WorkerManager {
   queueReason(w: WorkerRow): { reason: 'after' | 'slot' | 'memory'; detail: string } | null {
     if (w.status !== 'queued') return null;
     const dep = w.after_worker ? this.app.store.workerById(w.after_worker) : null;
-    if (dep && (dep.status !== 'done' || this.syncing.has(dep.id))) return { reason: 'after', detail: `waits for ${ref.W(dep.id)} (${dep.status})` };
+    if (dep && dep.status !== 'done') return { reason: 'after', detail: `waits for ${ref.W(dep.id)} (${dep.status})` };
+    if (dep && this.syncing.has(dep.id)) return { reason: 'after', detail: `waits for ${ref.W(dep.id)}'s branch to be copied into the repo` };
     const max = this.app.config.workers.maxConcurrent;
     if (this.active.size >= max) return { reason: 'slot', detail: `${this.active.size}/${max} slots busy` };
     const free = Math.round(os.freemem() / 1048576);
@@ -199,19 +200,24 @@ export class WorkerManager {
     return null;
   }
 
+  /** Workers dispatched --after one that failed or was stopped: it will never be done, so they fail now. */
+  private failBrokenDependents(): void {
+    const { store } = this.app;
+    for (const w of store.workersWithStatus('queued')) {
+      const dep = w.after_worker ? store.workerById(w.after_worker) : null;
+      if (!dep || !['failed', 'stopped'].includes(dep.status)) continue;
+      const msg = `${ref.W(dep.id)} ended ${dep.status}, and this task was to start after it`;
+      store.updateWorker(w.id, { status: 'failed', error: msg });
+      store.addLog(w.id, null, 'error', msg);
+      this.report(w.id, 'failed', '', null, null, msg);
+      this.changed(w.id);
+    }
+  }
+
   private needsRun(w: WorkerRow): boolean {
     if (w.archived || this.active.has(w.id)) return false;
     if (w.after_worker && w.status === 'queued') {
       const dep = this.app.store.workerById(w.after_worker);
-      if (dep && ['failed', 'stopped'].includes(dep.status)) {
-        // What it waited for will never be done: say so instead of waiting forever.
-        const msg = `${ref.W(dep.id)} ended ${dep.status}, and this task was to start after it`;
-        this.app.store.updateWorker(w.id, { status: 'failed', error: msg });
-        this.app.store.addLog(w.id, null, 'error', msg);
-        this.report(w.id, 'failed', '', null, null, msg);
-        this.changed(w.id);
-        return false;
-      }
       if (dep && (dep.status !== 'done' || this.syncing.has(dep.id))) return false;
     }
     if (w.status === 'queued') return true;
@@ -221,6 +227,7 @@ export class WorkerManager {
   schedule(): void {
     const { store } = this.app;
     const max = this.app.config.workers.maxConcurrent;
+    this.failBrokenDependents(); // even when every slot is busy (it may fail a whole chain, one link per pass)
     if (this.active.size >= max) return;
     const ids = new Set<number>([...store.workersWithStatus('queued').map((w) => w.id), ...store.workersWithMail()]);
     for (const id of [...ids].sort((a, b) => a - b)) {

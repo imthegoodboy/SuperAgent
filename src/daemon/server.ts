@@ -155,19 +155,22 @@ route('POST', '/api/serve', async ({ body }) => {
   const root = path.resolve(String(body?.root ?? ''));
   if (!body?.root || !fs.existsSync(root) || !fs.statSync(root).isDirectory()) throw new HttpError(400, `not a folder: ${root}`);
   const page = String(body?.page ?? '').replace(/^\/+/, '');
-  const known = served.get(root);
-  if (known && (!body?.port || new URL(known.url).port === String(body.port))) return { url: known.url + page, folder: root, reused: true };
-  if (known) {
-    known.server.close();
-    served.delete(root);
-  }
-  if (served.size >= 20) throw new HttpError(400, 'already serving 20 folders; stop some with `superagent serve --stop`');
+  const wants = (s: { url: string } | undefined) => !!s && (!body?.port || new URL(s.url).port === String(body.port));
+  if (wants(served.get(root))) return { url: served.get(root)!.url + page, folder: root, reused: true };
+  if (!served.has(root) && served.size >= 20) throw new HttpError(400, 'already serving 20 folders; stop some with `superagent serve --stop`');
   let server: http.Server;
   try {
     server = await serve(root, Number(body?.port) || 0);
   } catch (e) {
+    // The old URL, if any, keeps working.
     throw new HttpError(400, `could not serve on port ${body?.port}: ${(e as Error).message}`);
   }
+  // Another request for this folder may have finished while this one was starting: keep one server.
+  if (wants(served.get(root))) {
+    server.close();
+    return { url: served.get(root)!.url + page, folder: root, reused: true };
+  }
+  served.get(root)?.server.close(); // a different --port replaces the old server only once the new one listens
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/`;
   served.set(root, { server, url });
   return { url: url + page, folder: root, reused: false };
@@ -402,7 +405,7 @@ function sse(app: App, req: http.IncomingMessage, res: http.ServerResponse): voi
 }
 
 export function createServer(app: App): http.Server {
-  return http.createServer(async (req, res) => {
+  const server = http.createServer(async (req, res) => {
     const port = app.listenPort || app.config.port;
     const host = String(req.headers.host ?? '');
     // DNS-rebinding guard: only answer to our own loopback names.
@@ -441,4 +444,9 @@ export function createServer(app: App): http.Server {
     }
     return send(res, 404, { error: 'not found' });
   });
+  // Clients (fetch) reuse idle connections for about 4 s; Node closes them after 5 s. A client that is
+  // slow to notice, on a busy machine, then writes to a closed socket (ECONNRESET). Keep them open longer.
+  server.keepAliveTimeout = 65_000;
+  server.headersTimeout = 66_000;
+  return server;
 }

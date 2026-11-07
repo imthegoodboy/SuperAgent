@@ -740,7 +740,9 @@ async function previewCmd(target: string | undefined, file: string | undefined, 
 async function serveCmd(target: string | undefined, v: Record<string, any>): Promise<void> {
   await ensureRunning();
   if (v.stop) {
-    const only = target ? (await targetFolder(target, 'superagent serve --stop [W#3|path]')).root : null;
+    const picked = target ? (await targetFolder(target, 'superagent serve --stop [W#3|path]')).root : null;
+    // A file was served through its folder.
+    const only = picked && !fs.statSync(picked).isDirectory() ? path.dirname(picked) : picked;
     const r = await api('DELETE', `/api/serve${only ? `?root=${encodeURIComponent(only)}` : ''}`);
     return out(r, () => console.log(r.stopped.length ? `${green('✓')} Stopped serving ${r.stopped.join(', ')}` : dim('Nothing was being served.')));
   }
