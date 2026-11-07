@@ -473,7 +473,8 @@ export async function main(argv: string[]): Promise<void> {
   if (v.version || cmd === 'version') return console.log(pkgVersion());
   if (v.help || cmd === 'help') return console.log(HELP);
 
-  try {
+  // The cases `return someCommand()`; awaiting the whole switch makes their rejections reach the catch.
+  const dispatch = async (): Promise<void> => {
     switch (cmd) {
       case undefined:
         await status();
@@ -564,6 +565,9 @@ export async function main(argv: string[]): Promise<void> {
         console.log(HELP);
         die(`Unknown command "${cmd}"`);
     }
+  };
+  try {
+    await dispatch();
   } catch (e) {
     die((e as Error).message);
   }

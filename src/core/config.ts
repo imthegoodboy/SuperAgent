@@ -131,6 +131,8 @@ export function loadConfig(): Config {
 }
 
 export function saveConfig(cfg: Config): void {
+  // The CLI can change settings before the daemon has ever created the data folder.
+  fs.mkdirSync(paths.home, { recursive: true });
   const tmp = paths.config + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2));
   fs.renameSync(tmp, paths.config);
