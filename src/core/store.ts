@@ -340,10 +340,9 @@ export class Store {
   updateWorker(id: number, fields: Partial<Record<keyof WorkerRow, Param>>): void {
     this.update('workers', id, { ...fields, updated_at: Date.now() });
   }
-  listWorkers(includeArchived = false, limit = 200): WorkerRow[] {
-    return includeArchived
-      ? this.all<WorkerRow>('SELECT * FROM workers ORDER BY id DESC LIMIT ?', limit)
-      : this.all<WorkerRow>('SELECT * FROM workers WHERE archived = 0 ORDER BY id DESC LIMIT ?', limit);
+  listWorkers(which: 'current' | 'archived' | 'all' = 'current', limit = 200): WorkerRow[] {
+    const where = which === 'all' ? '' : `WHERE archived = ${which === 'archived' ? 1 : 0}`;
+    return this.all<WorkerRow>(`SELECT * FROM workers ${where} ORDER BY id DESC LIMIT ?`, limit);
   }
   workersWithStatus(...statuses: WorkerStatus[]): WorkerRow[] {
     return this.all<WorkerRow>(

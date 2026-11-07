@@ -3,7 +3,7 @@ import http from 'node:http';
 import path from 'node:path';
 import type { App } from './app.js';
 import { publicConfig } from '../core/config.js';
-import { UI_DIR, pkgVersion } from '../core/paths.js';
+import { HOME_ID, UI_DIR, pkgVersion } from '../core/paths.js';
 import { bus, emit, ref } from '../core/util.js';
 import { autostartStatus, installSkill, openFolder, resolveRepoInput, setAutostart, skillStatus, type SkillTarget } from './system.js';
 
@@ -63,7 +63,14 @@ route('POST', '/api/messages', ({ app, body }) => {
   return app.sendLocal(text);
 });
 
-route('GET', '/api/workers', ({ app, query }) => app.store.listWorkers(query.get('archived') === '1'));
+route('GET', '/api/workers', ({ app, query }) =>
+  app.store.listWorkers(query.get('archived') === 'only' ? 'archived' : query.get('archived') === '1' ? 'all' : 'current').map((w) =>
+    // Active workers carry their recent event kinds so the UI can draw activity tracks right away.
+    ['queued', 'running', 'waiting'].includes(w.status)
+      ? { ...w, ticks: app.store.tailLogs(w.id, 48).map((l) => l.kind) }
+      : w,
+  ),
+);
 route('POST', '/api/workers', ({ app, body }) => {
   const task = String(body?.task ?? '').trim();
   if (!task) throw new HttpError(400, 'task is required');
@@ -281,8 +288,7 @@ function serveStatic(app: App, pathname: string, res: http.ServerResponse): void
     if (!path.extname(rel)) return serveStatic(app, '/', res);
     return send(res, 404, 'not found');
   }
-  let data: string | Buffer = fs.readFileSync(file);
-  if (rel === 'index.html') data = data.toString('utf8').replace('__SA_TOKEN__', app.token);
+  const data = fs.readFileSync(file);
   res.writeHead(200, {
     'content-type': MIME[path.extname(file)] ?? 'application/octet-stream',
     'cache-control': 'no-store',
@@ -323,7 +329,7 @@ export function createServer(app: App): http.Server {
     const method = req.method ?? 'GET';
 
     if (url.pathname === '/api/health') {
-      return send(res, 200, { ok: true, name: 'superagent', version: pkgVersion(), pid: process.pid, uptime: Date.now() - app.startedAt });
+      return send(res, 200, { ok: true, name: 'superagent', home: HOME_ID, version: pkgVersion(), pid: process.pid, uptime: Date.now() - app.startedAt });
     }
     if (!url.pathname.startsWith('/api/')) {
       if (method !== 'GET') return send(res, 405, 'method not allowed');

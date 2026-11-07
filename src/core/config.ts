@@ -65,7 +65,8 @@ export const DEFAULT_POLICIES = `- In monitored GitHub repos, if someone reports
 export function defaultConfig(): Config {
   return {
     port: 7878,
-    mention: '@superagent',
+    // "@superagent" would ping a real GitHub user of that name; a slash command doesn't.
+    mention: '/superagent',
     router: { agent: 'claude', model: 'haiku', maxBatch: 20, rotateAfterTurns: 60 },
     workers: {
       defaultAgent: 'claude',
@@ -130,6 +131,8 @@ export function loadConfig(): Config {
 }
 
 export function saveConfig(cfg: Config): void {
+  // The CLI can change settings before the daemon has ever created the data folder.
+  fs.mkdirSync(paths.home, { recursive: true });
   const tmp = paths.config + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2));
   fs.renameSync(tmp, paths.config);

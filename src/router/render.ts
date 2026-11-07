@@ -105,7 +105,7 @@ export function renderPrimer(app: App): string {
     lines.push('Recent local chat:');
     for (const m of msgs) lines.push(`  ${m.role === 'user' ? 'user' : 'you'}: ${snippet(m.text, 200)}`);
   }
-  const workers = app.store.listWorkers(false, 12);
+  const workers = app.store.listWorkers('current', 12);
   if (workers.length) {
     lines.push('Recent workers:');
     for (const w of workers) lines.push(`- ${workerBrief(app, w)}${w.pr_url ? ` · PR ${w.pr_url}` : ''}${w.summary ? ` · ${snippet(w.summary, 160)}` : ''}`);

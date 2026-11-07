@@ -213,7 +213,8 @@ export const opencode: AgentAdapter = {
     ];
   },
   routerArgs(s) {
-    return ['run', '--format', 'json', ...(s.model ? ['-m', s.model] : []), ...(s.session ? ['-s', s.session] : [])];
+    // The built-in read-only "plan" agent keeps the router from editing files or running commands.
+    return ['run', '--format', 'json', '--agent', 'plan', ...(s.model ? ['-m', s.model] : []), ...(s.session ? ['-s', s.session] : [])];
   },
   parser() {
     let sent = false;
