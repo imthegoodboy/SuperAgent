@@ -28,7 +28,8 @@ test('config and repo commands work before the daemon ever ran', () => {
   const cfg = JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8'));
   assert.equal(cfg.port, 17999);
   assert.equal(cfg.repos[0].name, 'proj');
-  assert.equal(path.resolve(cfg.repos[0].path), path.resolve(repoDir));
+  // git reports canonical paths (/private/var on macOS, long names instead of RUNNER~1 on Windows).
+  assert.equal(fs.realpathSync.native(cfg.repos[0].path), fs.realpathSync.native(repoDir));
 });
 
 test('errors are short messages, not stack traces', () => {
