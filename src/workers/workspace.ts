@@ -32,8 +32,13 @@ async function git(cwd: string, args: string[]): Promise<string> {
   return (await runOk('git', ['-C', cwd, ...args], { timeoutMs: 5 * 60_000 })).trim();
 }
 
-/** Each task gets its own git worktree and branch, so parallel workers never step on each other. */
-export async function prepareWorkspace(w: WorkerRow, repo: RepoConfig | undefined): Promise<Workspace> {
+/**
+ * Each task gets its own git worktree and branch, so parallel workers never step on each other.
+ * `ownGitDir`: a sandboxed agent can only write inside its folder, but a worktree keeps its index in the
+ * main repo's .git. Such a worker gets a self-contained clone that shares the repo's objects
+ * (`clone --shared`, nothing is copied); `syncBranch` brings its branch back into the repo.
+ */
+export async function prepareWorkspace(w: WorkerRow, repo: RepoConfig | undefined, opts: { ownGitDir?: boolean } = {}): Promise<Workspace> {
   if (!repo) {
     const cwd = path.join(paths.scratch, `w${w.id}`);
     fs.mkdirSync(cwd, { recursive: true });
@@ -61,11 +66,32 @@ export async function prepareWorkspace(w: WorkerRow, repo: RepoConfig | undefine
   const branch = `superagent/w${w.id}-${slugify(w.title, 32)}`;
   const cwd = path.join(paths.worktrees, `${slugify(repo.name, 24)}-w${w.id}`);
   if (!fs.existsSync(cwd)) {
-    const exists = (await run('git', ['-C', checkout, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])).code === 0;
-    await git(checkout, exists ? ['worktree', 'add', cwd, branch] : ['worktree', 'add', '-b', branch, cwd, base]);
+    const existing = await run('git', ['-C', checkout, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]);
+    if (opts.ownGitDir) {
+      const baseSha = await git(checkout, ['rev-parse', `${base}^{commit}`]);
+      const start = existing.code === 0 ? existing.stdout.trim() : baseSha;
+      await runOk('git', ['clone', '--quiet', '--shared', '--no-checkout', checkout, cwd], { timeoutMs: 5 * 60_000 });
+      // The base ref points where it does in the repo, so diffs and PRs read the same as in a worktree.
+      if (base !== 'HEAD') await git(cwd, ['update-ref', base.startsWith('origin/') ? `refs/remotes/${base}` : `refs/heads/${base}`, baseSha]);
+      await git(cwd, ['checkout', '--quiet', '-B', branch, start]);
+      // Pushes and PRs go where the repo's own origin points.
+      const url = hasOrigin ? (await run('git', ['-C', checkout, 'remote', 'get-url', 'origin'])).stdout.trim() : '';
+      if (url) await git(cwd, ['remote', 'set-url', 'origin', url]);
+    } else {
+      await git(checkout, existing.code === 0 ? ['worktree', 'add', cwd, branch] : ['worktree', 'add', '-b', branch, cwd, base]);
+    }
   }
   const common = await git(cwd, ['rev-parse', '--git-common-dir']);
   return { cwd, branch, base, gitDir: path.resolve(cwd, common) };
+}
+
+/** A worker in its own clone: copy its branch into the repo, where a worktree's branch would already be. */
+export async function syncBranch(w: WorkerRow, repo: RepoConfig | undefined): Promise<void> {
+  if (!repo || !w.cwd || !w.branch) return;
+  if (!fs.statSync(path.join(w.cwd, '.git'), { throwIfNoEntry: false })?.isDirectory()) return; // a worktree
+  const checkout = await ensureCheckout(repo);
+  // Refused (and harmless) if the person has that branch checked out themselves.
+  await run('git', ['-C', checkout, 'fetch', '--quiet', w.cwd, `+refs/heads/${w.branch}:refs/heads/${w.branch}`], { timeoutMs: 5 * 60_000 });
 }
 
 /** Remove a worker's worktree (the branch stays, it may back an open PR). */

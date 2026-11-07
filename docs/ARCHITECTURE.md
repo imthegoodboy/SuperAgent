@@ -66,7 +66,10 @@ state:
 **Worker layer:** `src/workers/manager.ts`. Each worker is one task with an isolated context: a headless
 coding-agent session (`src/agents/adapters.ts`) running in its own git worktree and branch when the
 task belongs to a configured repository, or in its own scratch folder otherwise
-(`src/workers/workspace.ts`). Workers never talk to people. They end each run with a
+(`src/workers/workspace.ts`). An agent whose sandbox can only write inside its own folder (Codex in safe
+mode) can't commit in a worktree, whose index lives in the main repo's `.git`; it gets a self-contained
+`git clone --shared` instead (no objects copied), and SuperAgent copies its branch back into the repo
+after every run, so the result looks the same. Workers never talk to people. They end each run with a
 `<superagent-report>` block (status, summary, PR URL, question), which becomes an event for the router.
 Follow-ups resume the same agent session, so a worker keeps its memory of the task across runs.
 `workers.maxConcurrent` caps how many run at once; the rest queue.

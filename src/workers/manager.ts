@@ -5,7 +5,7 @@ import { emit, log, ref, snippet, tail } from '../core/util.js';
 import { adapterFor, type AgentEvent } from '../agents/adapters.js';
 import { startWorkerRun } from '../agents/runner.js';
 import { findPrUrl, firstPrompt, followupPrompt, parseReport, workerSystem } from './prompts.js';
-import { prepareWorkspace, removeWorkspace, type Workspace } from './workspace.js';
+import { prepareWorkspace, removeWorkspace, syncBranch, type Workspace } from './workspace.js';
 
 interface ActiveRun {
   runId: number;
@@ -176,7 +176,7 @@ export class WorkerManager {
       if (!w.cwd) {
         store.updateWorker(id, { status: 'running' });
         this.changed(id);
-        ws = await prepareWorkspace(w, repo);
+        ws = await prepareWorkspace(w, repo, { ownGitDir: !!adapter.needsOwnGitDir?.(config.workers.autonomy) });
         store.updateWorker(id, { cwd: ws.cwd, branch: ws.branch, base: ws.base, git_dir: ws.gitDir });
       } else ws = { cwd: w.cwd, branch: w.branch, base: w.base, gitDir: w.git_dir };
       if (entry.ending) return;
@@ -258,6 +258,8 @@ export class WorkerManager {
     const { store } = this.app;
     const w = store.workerById(id)!;
     const ended = Date.now();
+    // Whatever the run committed in its own clone belongs in the repo, however the run ended.
+    void syncBranch(w, this.app.findRepo(w.repo ?? undefined)).catch((e) => log(`worker ${ref.W(id)}: branch sync failed:`, (e as Error).message));
     if (entry.ending === 'stopped' || entry.ending === 'shutdown') {
       store.updateRun(runId, { status: entry.ending, ended_at: ended, exit_code: res.code });
       return;
