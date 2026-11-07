@@ -28,11 +28,13 @@ You talk to one agent; SuperAgent runs the rest.
 ## Install
 
 ```sh
-npm install -g @phigon/superagent
+npm install -g @phigon/superagent && superagent install
 ```
 
-That's the only step. The install adds the `superagent` skill to every coding agent on your computer, and
-the background service starts by itself the first time your agent uses it.
+That's the only step. `superagent install` adds the `superagent` skill to every coding agent on your
+computer: Claude Code, Codex, OpenCode and Cursor. Recent npm versions don't run install scripts for global
+packages, so this is done by a command instead. The background service starts by itself the first time
+your agent uses it.
 
 You need **Node.js 22.13+**, **git**, and at least one coding agent signed in:
 [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex),
@@ -186,7 +188,7 @@ Every command accepts `--json`.
 ## Update and uninstall
 
 ```sh
-npm install -g @phigon/superagent@latest && superagent restart   # update
+npm install -g @phigon/superagent@latest && superagent install && superagent restart   # update
 
 superagent uninstall                         # stop it, remove the skill and start-at-login
 npm uninstall -g @phigon/superagent    # then remove the command

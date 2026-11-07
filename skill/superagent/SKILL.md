@@ -153,4 +153,4 @@ or describe the changes in the task.
   and future sessions know them too.
 - Workers only push their own `superagent/…` branch and open draft PRs. Never ask one to merge, push to
   the main branch, or handle secrets. Never put secrets in task text.
-- If `superagent` is not found, tell the user to install it: `npm install -g @phigon/superagent`.
+- If `superagent` is not found, tell the user to install it: `npm install -g @phigon/superagent && superagent install`.
