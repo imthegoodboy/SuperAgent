@@ -44,8 +44,11 @@ export async function api<T = any>(method: string, path: string, body?: unknown)
     try {
       res = await send();
     } catch (e) {
-      // A reused connection the service had just closed: reading again is safe, changing things is not.
-      if (method !== 'GET' || (e as { cause?: { code?: string } })?.cause?.code !== 'ECONNRESET') throw e;
+      // A reused connection the service had just closed. Asking again is safe only for a pure read:
+      // not for changes, and not for `events`, which hands its batch out as it answers.
+      const code = (e as { cause?: { code?: string } })?.cause?.code ?? '';
+      const handsOut = path.startsWith('/api/router/events') && !/[?&](peek|again)=/.test(path);
+      if (method !== 'GET' || handsOut || !['ECONNRESET', 'UND_ERR_SOCKET'].includes(code)) throw e;
       res = await send();
     }
   } catch (e) {

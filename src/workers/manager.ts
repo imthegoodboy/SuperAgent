@@ -227,7 +227,9 @@ export class WorkerManager {
   schedule(): void {
     const { store } = this.app;
     const max = this.app.config.workers.maxConcurrent;
-    this.failBrokenDependents(); // even when every slot is busy (it may fail a whole chain, one link per pass)
+    // Even when every slot is busy. Workers come in id order and a dependent is always newer than what it
+    // waits for, so a whole chain fails in this one pass.
+    this.failBrokenDependents();
     if (this.active.size >= max) return;
     const ids = new Set<number>([...store.workersWithStatus('queued').map((w) => w.id), ...store.workersWithMail()]);
     for (const id of [...ids].sort((a, b) => a - b)) {
