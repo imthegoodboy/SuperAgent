@@ -45,7 +45,8 @@ agents, and `SUPERAGENT_SKIP_AUTOSTART=1` keeps it from touching start-at-login.
 
 - One topic per PR, with a description of what changed and how you tested it.
 - Add or update tests: parsers and policies in `test/unit.test.mjs`, behaviour in `test/e2e.test.mjs`.
-- `npm run typecheck` and `npm test` must pass. CI runs them on Windows, macOS and Linux.
+- `npm run typecheck` and `npm test` must pass. CI runs them on Windows, macOS and Linux, and also packs the
+  package, installs it like a user and uses it end to end (`npm pack && node scripts/smoke-installed.mjs ./phigon-superagent-*.tgz`).
 - Read [AGENTS.md](AGENTS.md) for layout and conventions, and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
   before changing the router, triggers or workers.
 
