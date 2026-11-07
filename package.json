@@ -1,5 +1,5 @@
 {
-  "name": "@imthegoodboy/superagent",
+  "name": "@phigon/superagent",
   "version": "0.1.0",
   "description": "Turns your coding agent (Claude Code, Codex, OpenCode, Cursor) into a Super-agent: an always-on router that runs other coding agents in parallel, each in its own git worktree.",
   "type": "module",

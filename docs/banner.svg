@@ -28,9 +28,9 @@
     <text x="86" y="292" font-size="18" fill="#8d9bd0">Claude Code · Codex · OpenCode · Cursor, working in parallel</text>
   </g>
   <g font-family="ui-monospace, 'Cascadia Mono', Menlo, Consolas, monospace">
-    <rect x="84" y="318" width="470" height="44" rx="10" fill="#0b1226" stroke="#2c3d78"/>
+    <rect x="84" y="318" width="420" height="44" rx="10" fill="#0b1226" stroke="#2c3d78"/>
     <text x="104" y="347" font-size="18" fill="#7ee0a8">$</text>
-    <text x="124" y="347" font-size="18" fill="#e6ebff">npm install -g @imthegoodboy/superagent</text>
+    <text x="124" y="347" font-size="18" fill="#e6ebff">npm install -g @phigon/superagent</text>
   </g>
 
   <!-- Events flowing in -->
