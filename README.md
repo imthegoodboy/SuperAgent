@@ -89,9 +89,9 @@ The install copies the skill into each agent's global skills folder:
 
 | Agent | Skill folder |
 |---|---|
-| Claude Code | `~/.claude/skills/superagent` |
+| Claude Code | `~/.claude/skills/superagent` (with a hook that shows waiting events on every message) |
 | Codex | `~/.codex/skills/superagent` (or `$CODEX_HOME`) |
-| OpenCode | reads `~/.claude/skills`; otherwise `~/.config/opencode/skills/superagent` |
+| OpenCode | `~/.config/opencode/skills/superagent` |
 | Cursor | `~/.cursor/skills/superagent` |
 
 If your package manager skips install scripts (`--ignore-scripts`, pnpm), the first `superagent` command
@@ -112,6 +112,16 @@ Open your agent and ask:
 The agent attaches as the router (`superagent router attach`) and drives everything with the
 `superagent` CLI. The skill teaches it how. On GitHub, write **`/superagent`** in an issue or comment.
 Only allowlisted GitHub users can trigger work, and the list starts with just you.
+
+**In Claude Code, results show up by themselves.** Once a session has used the skill, a hook checks for
+waiting events on every message you send and adds a short `[SuperAgent]` notice to the agent's context:
+"W#4 finished, @alice asked something on TH#8". It only peeks, so the agent still handles them with
+`superagent events`.
+
+**A dedicated router session:** `superagent claude` opens Claude Code in your terminal already acting as
+the router, optionally with a first request (`superagent claude "fix the flaky login test"`). It has only
+the shell and skills, no editing tools, and only `superagent` commands are pre-approved. So it hands
+work out instead of doing it itself, which the article found prompts alone can't guarantee.
 
 ### Commands your agent uses
 

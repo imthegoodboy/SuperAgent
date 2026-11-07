@@ -61,10 +61,13 @@ test('the first command installs the skill for every agent found, and uninstall 
     assert.equal(sa('version').status, 0);
     assert.ok(!fs.existsSync(skillAt(home, '.claude')), '`version` does nothing else');
     assert.equal(sa('config').status, 0, 'any real command installs the skill');
-    for (const dir of [path.join(home, '.claude'), path.join(home, '.codex'), path.join(home, '.cursor')]) {
-      assert.equal(fs.readFileSync(skillAt(dir), 'utf8'), own, `installed in ${dir}`);
+    for (const dir of [path.join(home, '.codex'), path.join(home, '.cursor'), path.join(home, '.config', 'opencode')]) {
+      assert.equal(fs.readFileSync(skillAt(dir), 'utf8'), own, `the plain skill is installed in ${dir}`);
     }
-    assert.ok(!fs.existsSync(skillAt(home, '.config', 'opencode')), 'OpenCode reads ~/.claude/skills, so it gets no second copy');
+    // Claude Code's copy also declares the hook that shows waiting events on every user message.
+    const claude = fs.readFileSync(skillAt(home, '.claude'), 'utf8');
+    assert.match(claude.match(/^---\n([\s\S]*?)\n---/)[1], /UserPromptSubmit:[\s\S]*command: superagent hook prompt/);
+    assert.equal(claude.replace(/^hooks:\n( {2}.*\n)+/m, ''), own, 'otherwise the same skill');
 
     // Someone removes it on purpose: it stays removed until they ask for it again.
     fs.rmSync(path.dirname(skillAt(home, '.codex')), { recursive: true });
@@ -79,7 +82,7 @@ test('the first command installs the skill for every agent found, and uninstall 
     fs.writeFileSync(notes, 'mine');
     const un = sa('uninstall');
     assert.equal(un.status, 0, un.stderr);
-    for (const dir of ['.claude', '.codex', '.cursor']) assert.ok(!fs.existsSync(skillAt(home, dir)), `removed from ${dir}`);
+    for (const dir of ['.claude', '.codex', '.cursor', path.join('.config', 'opencode')]) assert.ok(!fs.existsSync(skillAt(home, dir)), `removed from ${dir}`);
     assert.ok(fs.existsSync(path.join(home, '.claude')), "the agent's own folder stays");
     assert.equal(fs.readFileSync(notes, 'utf8'), 'mine', 'files that are not ours stay');
     assert.equal(sa('config').status, 0);

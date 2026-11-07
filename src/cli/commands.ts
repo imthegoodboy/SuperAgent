@@ -5,7 +5,7 @@ import { parseArgs } from 'node:util';
 import { AGENT_IDS, applyConfigPatch, loadConfig, publicConfig, saveConfig, type SourceMode } from '../core/config.js';
 import { CLI_PATH, ensureDirs, paths, pkgVersion } from '../core/paths.js';
 import { ago, duration, sleep } from '../core/util.js';
-import { isAlive, killTree, run } from '../agents/process.js';
+import { isAlive, killTree, resolveCommand, run, runInteractive } from '../agents/process.js';
 import { detectAgents } from '../agents/runner.js';
 import {
   autostartStatus,
@@ -18,7 +18,7 @@ import {
   uninstallIntegrations,
 } from '../daemon/system.js';
 import { STOP_FLAG, watchdogPid } from '../daemon/watchdog.js';
-import { api, baseUrl, events, health } from './client.js';
+import { api, baseUrl, events, health, sessionId, token } from './client.js';
 
 // The `superagent` CLI is used by coding agents (Claude Code, Codex, OpenCode, Cursor) that load the
 // superagent skill and act as SuperAgent's router. Output is plain text for the agent to read, or
@@ -106,6 +106,7 @@ that runs Claude Code, Codex, OpenCode and Cursor workers in parallel, each in i
 These commands are for coding agents. The ${bold('superagent')} skill explains how to use them.
 
 ${bold('Be the router')}
+  claude [request]            Open Claude Code in this terminal as the router (no editing tools)
   router attach [--take]      Become the router: context, memory, and what happened while you were away
   router detach               Hand the router role back to the background router
   router status               Who is the router right now, and its recent turns
@@ -233,7 +234,7 @@ async function status(): Promise<void> {
 // ---------- the router: an attached agent session ----------
 
 /** Workers see the skill too. They may look around, but only the router changes anything. */
-const WORKER_COMMANDS = new Set(['status', 'workers', 'ls', 'logs', 'recall', 'graph', 'memory', 'activity', 'agents', 'doctor']);
+const WORKER_COMMANDS = new Set(['status', 'workers', 'ls', 'logs', 'recall', 'graph', 'memory', 'activity', 'agents', 'doctor', 'hook']);
 
 function refuseInWorker(cmd: string | undefined, sub: string | undefined): void {
   const w = process.env.SUPERAGENT_WORKER;
@@ -538,6 +539,77 @@ async function doctor(): Promise<void> {
   if (asJson) console.log(JSON.stringify({ ok: !checks.some((c) => c.level === 'bad'), checks, skill }, null, 2));
 }
 
+/** The router's role, given to Claude Code by `superagent claude`. One line: it travels as an argument. */
+const ROUTER_ROLE =
+  'You are running as the router of SuperAgent. Use the superagent skill. You talk to the user and hand every piece of real work to workers with the superagent CLI; never edit files or run project commands yourself. Only superagent commands are pre-approved here.';
+
+/** Arguments for an interactive Claude Code session that is the router (exported for tests). */
+export function claudeRouterArgs(request: string): string[] {
+  const first = request
+    ? `Attach as SuperAgent's router, then handle this: ${request}`
+    : "Attach as SuperAgent's router and give me a short status: what is running, what needs me, and what happened while I was away.";
+  return [
+    // Only the shell (for the superagent CLI) and skills: no editing tools, so it can't drift into
+    // doing the work itself. That was the main failure of single sessions in the article's experiment.
+    '--tools', 'Bash,Skill',
+    '--allowedTools', 'Bash(superagent *),Bash(superagent)',
+    '--append-system-prompt', ROUTER_ROLE,
+    first,
+  ];
+}
+
+/** `superagent claude [request]`: open Claude Code in this terminal, already acting as the router. */
+async function launchClaude(request: string): Promise<void> {
+  const resolved = resolveCommand('claude');
+  if (!resolved) die('Claude Code is not installed (`claude` was not found on PATH).');
+  await ensureRunning();
+  const code = await runInteractive(resolved, claudeRouterArgs(request), process.cwd());
+  if (code) process.exitCode = code;
+}
+
+/**
+ * `superagent hook prompt`: the skill registers this as a Claude Code UserPromptSubmit hook, so it runs
+ * on every user message once the session has used the skill. When this session is the router and
+ * events are waiting, it prints a short notice that becomes part of the model's context: results show
+ * up without asking (the article's full-duplex delivery). It hands nothing out, never starts the
+ * service, and never fails or slows the agent down.
+ */
+async function hook(): Promise<void> {
+  let input: { session_id?: string } = {};
+  if (!process.stdin.isTTY) {
+    process.stdin.setEncoding('utf8');
+    let raw = '';
+    const read = (async () => {
+      for await (const chunk of process.stdin) raw += chunk;
+    })();
+    await Promise.race([read, sleep(1000)]);
+    try {
+      input = JSON.parse(raw || '{}');
+    } catch {
+      /* not JSON: use the environment */
+    }
+  }
+  const session = String(input.session_id || sessionId());
+  if (!session) return;
+  try {
+    const res = await fetch(`${baseUrl()}/api/router/peek`, {
+      headers: { authorization: `Bearer ${token()}`, 'x-superagent-session': session },
+      signal: AbortSignal.timeout(1500),
+    });
+    if (!res.ok) return;
+    const r = (await res.json()) as { attached: boolean; pending: string[]; away_pending: boolean };
+    if (!r.attached || (!r.pending.length && !r.away_pending)) return;
+    const n = r.pending.length;
+    const head = n ? `${n} event${n === 1 ? ' is' : 's are'} waiting` : 'things happened while no agent was the router';
+    const lines = [`[SuperAgent] You are the router and ${head}. Run \`superagent events\` and handle ${n === 1 ? 'it' : 'them'} along with this message.`];
+    for (const p of r.pending.slice(0, 8)) lines.push(`- ${p}`);
+    if (n > 8) lines.push(`- … and ${n - 8} more`);
+    console.log(lines.join('\n'));
+  } catch {
+    /* service not running or slow: say nothing */
+  }
+}
+
 async function uninstall(): Promise<void> {
   await stop(true);
   const removed = uninstallIntegrations();
@@ -748,6 +820,11 @@ export async function main(argv: string[]): Promise<void> {
       }
       case 'doctor':
         return doctor();
+      case 'claude':
+        return launchClaude(rest.join(' ').trim());
+      case 'hook':
+        if (rest[0] !== 'prompt') die('Usage: superagent hook prompt   (run by an agent harness on each user message)');
+        return hook();
       default:
         if (!asJson) console.log(HELP);
         die(`Unknown command "${cmd}"`);

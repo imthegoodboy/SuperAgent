@@ -8,7 +8,7 @@ import type { TriggerRow } from '../core/store.js';
 import { ago, bus, emit, extractJsonObject, log, parseRefOf, ref, snippet, tryJson } from '../core/util.js';
 import { adapterFor } from '../agents/adapters.js';
 import { startRouterRun } from '../agents/runner.js';
-import { renderAttach, renderAway, renderContext, renderEvents, renderPrimer, renderRecall, renderTurn } from './render.js';
+import { renderAttach, renderAway, renderContext, renderEvents, renderPrimer, renderRecall, renderTrigger, renderTurn } from './render.js';
 
 export const ROUTER_SYSTEM = `You are the Router of SuperAgent: one continuous, always-on agent that works for the user on their own computer.
 
@@ -421,6 +421,21 @@ export class Router {
     store.setKv('router.ext.turn', null);
     store.setKv('router.ext.batch', null);
     if (back.length) log(`router: ${back.length} event(s) the attached agent never acted on go to the background router`);
+  }
+
+  /**
+   * For agent hooks: what is waiting for the session that holds the lease, without handing anything
+   * out (that stays `events`' job). The person typing in that session keeps it the router.
+   */
+  peek(owner: string | null): { attached: boolean; pending: string[]; away_pending: boolean } {
+    const cur = this.lease();
+    if (!cur || owner === null || cur.owner !== owner) return { attached: false, pending: [], away_pending: false };
+    this.renew(owner);
+    const pending = this.app.store.pendingRouterTriggers(this.app.config.router.maxBatch).map((t) => {
+      const [head, body = ''] = renderTrigger(this.app, t).split('\n');
+      return `${head.split(' · ').slice(0, 3).join(' · ')}: ${snippet(body.trim().replace(/^"|"$/g, ''), 120)}`;
+    });
+    return { attached: true, pending, away_pending: !!this.app.store.getKv('router.awaySince') };
   }
 
   /** The lease length may have changed: re-arm the takeover timer for it. */

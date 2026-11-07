@@ -311,6 +311,23 @@ test('the CLI drives the router: attach, dispatch, events, graph, recall', async
   assert.match(bad.stderr, /not available/);
 });
 
+test('the Claude Code hook tells the router session what is waiting, and nobody else', async () => {
+  await call('POST', '/api/router/attach', { take: true }, 'hook-session');
+  await call('GET', '/api/router/events', undefined, 'hook-session');
+  const d = await act({ type: 'dispatch', task: 'hook job', title: 'Hook job' }, 'hook-session');
+  await until(async () => (await worker(d.worker)).status === 'done');
+  const hook = (session) => spawnSync(process.execPath, [cli, 'hook', 'prompt'], { env, input: JSON.stringify({ session_id: session, prompt: 'hi' }), encoding: 'utf8' });
+  const mine = hook('hook-session');
+  assert.equal(mine.status, 0, mine.stderr);
+  assert.match(mine.stdout, /^\[SuperAgent\] You are the router and 1 event is waiting/);
+  assert.ok(mine.stdout.includes(`REPORT · ${d.worker} (Mock Agent) "Hook job"`), mine.stdout);
+  assert.equal(hook('another-session').stdout, '', 'other sessions hear nothing');
+  const ev = await call('GET', '/api/router/events', undefined, 'hook-session');
+  assert.ok(ev.events.some((e) => e.worker === d.worker), 'the hook only peeks; events still hands it out');
+  assert.equal(hook('hook-session').stdout, '', 'nothing left to tell');
+  await call('POST', '/api/router/detach', {}, 'hook-session');
+});
+
 test('workers cannot use router commands', () => {
   const r = sa(['dispatch', 'spawn another worker'], { SUPERAGENT_WORKER: 'W#1' });
   assert.equal(r.status, 1);
@@ -318,4 +335,25 @@ test('workers cannot use router commands', () => {
   assert.equal(sa(['stop'], { SUPERAGENT_WORKER: 'W#1' }).status, 1, 'a worker cannot stop the service');
   assert.equal(sa(['config', 'set', 'workers.maxConcurrent', '9'], { SUPERAGENT_WORKER: 'W#1' }).status, 1);
   assert.equal(sa(['workers'], { SUPERAGENT_WORKER: 'W#1' }).status, 0, 'read-only commands still work');
+});
+
+test('`superagent claude` opens Claude Code as the router, with no editing tools', () => {
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'superagent-fake-claude-'));
+  const script = 'console.log(JSON.stringify(process.argv.slice(2)));\n';
+  if (process.platform === 'win32') {
+    // What npm writes for a global CLI: SuperAgent unwraps it and runs the script with node directly.
+    fs.writeFileSync(path.join(bin, 'fake-claude.js'), script);
+    fs.writeFileSync(path.join(bin, 'claude.cmd'), '@"%dp0%\\fake-claude.js" %*\r\n');
+  } else {
+    fs.writeFileSync(path.join(bin, 'claude'), `#!/usr/bin/env node\n${script}`, { mode: 0o755 });
+  }
+  const p = `${bin}${path.delimiter}${process.env.PATH ?? process.env.Path}`;
+  const r = sa(['claude', 'fix', 'the', 'login', 'bug'], { PATH: p, Path: p });
+  fs.rmSync(bin, { recursive: true, force: true });
+  assert.equal(r.status, 0, r.stderr);
+  const args = JSON.parse(r.stdout.trim().split('\n').pop());
+  assert.deepEqual(args.slice(0, 4), ['--tools', 'Bash,Skill', '--allowedTools', 'Bash(superagent *),Bash(superagent)']);
+  assert.equal(args[4], '--append-system-prompt');
+  assert.match(args[5], /router of SuperAgent/);
+  assert.match(args[6], /then handle this: fix the login bug$/);
 });

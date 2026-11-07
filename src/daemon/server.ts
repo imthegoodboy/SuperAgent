@@ -87,6 +87,7 @@ route('POST', '/api/router/actions', ({ app, body, req }) => {
   if (!actions.length) throw new HttpError(400, 'no actions');
   return asRouter(() => app.router.act(actions, sessionOf(req)));
 });
+route('GET', '/api/router/peek', ({ app, req }) => app.router.peek(sessionOf(req)));
 route('GET', '/api/recall', ({ app, query }) => {
   const ids = String(query.get('ids') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
   if (!ids.length) throw new HttpError(400, 'ids is required, e.g. ids=W#3,TH#8');

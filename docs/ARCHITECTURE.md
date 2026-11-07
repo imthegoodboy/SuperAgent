@@ -160,6 +160,16 @@ SuperAgent has no UI of its own. Agents use it through:
   global skills folder (`scripts/postinstall.mjs`). Every CLI command checks again (`ensureIntegrations`
   in `src/daemon/system.ts`), so agents installed later get it too, and an updated skill reaches the
   folders that have it. `superagent uninstall` removes it.
+- **The Claude Code hook.** Claude Code's copy of the skill declares a `UserPromptSubmit` hook in its
+  frontmatter. It is active for the rest of a session once the skill has been used, and runs
+  `superagent hook prompt` on every user message. If that session holds the lease and events are waiting,
+  the command prints a short notice that Claude Code adds to the model's context: the article's
+  "deliver the result as a new event message" (Section 4.1) without the agent asking. It only peeks
+  (`/api/router/peek`), renews the lease while the person is typing, and stays silent otherwise. The
+  other agents get the plain skill, since the shared skill format has no hooks.
+- **`superagent claude`** opens Claude Code in the terminal with `--tools Bash,Skill`, only `superagent`
+  commands pre-approved, and the router's role in its system prompt. Taking the editing tools away is the
+  system-level version of "the router never executes" (Section 2.1, and the subagent experiment in 7.1).
 - **The CLI** (`src/cli/commands.ts`): plain text for the agent to read, or JSON with `--json`. Text
   arguments given as `-` come from stdin. Router commands start the service on demand.
 - **The local API** (`src/daemon/server.ts`): a JSON API and a Server-Sent Events stream (`/api/events`)
@@ -193,9 +203,9 @@ directly.
 
 ## Not built (yet)
 
-- **Pushing events into an open session.** An attached agent sees new events when it runs
-  `superagent events` (after each user message, or in a `--wait` loop). Agent hooks could insert them
-  automatically on every turn.
+- **Pushing events into Codex, OpenCode and Cursor sessions.** Only Claude Code supports skill-declared
+  hooks today. Elsewhere the attached agent sees new events when it runs `superagent events` (after each
+  user message, or in a `--wait` loop).
 
 - **Cloud execution and BYOM devices** (Section 5.2): SuperAgent runs on one machine by design.
 - **Sharding the router or direct worker-to-worker messages** (Section 8.1): one router plus

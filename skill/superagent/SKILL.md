@@ -37,7 +37,8 @@ context was reset) or the user confirms it has ended; otherwise tell the user wh
 1. **The user asks for work** → `superagent dispatch` one worker per independent task. Tell the user
    who is on it ("W#4 (Codex) is adding CSV export"). Don't wait for it.
 2. **After every user message, and before you answer "what's going on"** → `superagent events`.
-   Handle each event (below). If none, say nothing about it.
+   Handle each event (below). If none, say nothing about it. In Claude Code, a `[SuperAgent]` notice
+   on your context lists events that are waiting when the user writes; handle those the same way.
 3. **The user asks you to keep watching** (or there is nothing else to do while workers run) →
    `superagent events --wait 90` (short enough for any shell-tool timeout), handle what arrives, repeat. Stop when the user speaks.
 4. **Done for now** → `superagent router detach` (or just stop: after 15 quiet minutes the background

@@ -55,8 +55,6 @@ interface Target {
   /** The agent's own config folder; it exists once the agent has been used here. */
   base: string;
   command: string;
-  /** Another target whose skill folder this agent also reads (so it would see the skill twice). */
-  readsFrom?: string;
 }
 
 function targets(): Target[] {
@@ -65,8 +63,7 @@ function targets(): Target[] {
   return [
     { agent: 'claude', label: 'Claude Code', base: path.join(home, '.claude'), command: 'claude' },
     { agent: 'codex', label: 'Codex', base: process.env.CODEX_HOME || path.join(home, '.codex'), command: 'codex' },
-    // OpenCode also loads ~/.claude/skills.
-    { agent: 'opencode', label: 'OpenCode', base: path.join(xdg, 'opencode'), command: 'opencode', readsFrom: 'claude' },
+    { agent: 'opencode', label: 'OpenCode', base: path.join(xdg, 'opencode'), command: 'opencode' },
     { agent: 'cursor', label: 'Cursor', base: path.join(home, '.cursor'), command: 'cursor-agent' },
   ];
 }
@@ -88,19 +85,41 @@ export interface Integration {
   label: string;
   /** The agent is on this computer. */
   detected: boolean;
-  /** Where the skill lives for this agent (possibly another agent's folder it also reads). */
+  /** Where the skill lives for this agent. */
   path: string | null;
   /** The installed skill matches this version of SuperAgent. */
   current: boolean;
 }
 
+/**
+ * Claude Code runs hooks declared in a skill's frontmatter for the rest of a session once the skill
+ * has been used. This one shows waiting events on every user message, without the agent asking. Other
+ * agents follow the plain Agent Skills format, so only Claude Code's copy carries it.
+ */
+const CLAUDE_HOOKS = `hooks:
+  UserPromptSubmit:
+    - hooks:
+        - type: command
+          command: superagent hook prompt
+          timeout: 5
+`;
+
+const sha1 = (s: string | Buffer) => crypto.createHash('sha1').update(s).digest('hex');
+
+/** SKILL.md as installed for one agent. */
+function skillText(t: Target): string {
+  const text = fs.readFileSync(path.join(SKILL_DIR, 'SKILL.md'), 'utf8');
+  return t.agent === 'claude' ? text.replace(/^(---\r?\n[\s\S]*?\r?\n)(---\r?\n)/, `$1${CLAUDE_HOOKS}$2`) : text;
+}
+
+/** Changes whenever what we would install changes. */
 function skillHash(): string {
-  return crypto.createHash('sha1').update(fs.readFileSync(path.join(SKILL_DIR, 'SKILL.md'))).digest('hex');
+  return sha1(targets().map(skillText).join('\0'));
 }
 
 function fileHash(file: string): string | null {
   try {
-    return crypto.createHash('sha1').update(fs.readFileSync(file)).digest('hex');
+    return sha1(fs.readFileSync(file));
   } catch {
     return null;
   }
@@ -110,29 +129,29 @@ function detected(t: Target): boolean {
   return fs.existsSync(t.base) || !!which(t.command);
 }
 
-function copySkill(dest: string): void {
+function copySkill(t: Target): void {
+  const dest = skillDir(t);
   fs.mkdirSync(dest, { recursive: true });
-  for (const f of fs.readdirSync(SKILL_DIR)) fs.copyFileSync(path.join(SKILL_DIR, f), path.join(dest, f));
+  for (const f of fs.readdirSync(SKILL_DIR)) {
+    if (f === 'SKILL.md') fs.writeFileSync(path.join(dest, f), skillText(t));
+    else fs.copyFileSync(path.join(SKILL_DIR, f), path.join(dest, f));
+  }
 }
 
-/** Where each detected agent should get the skill; agents that already read another folder share it. */
-function plan(): { target: Target; dest: string; own: boolean }[] {
-  const all = targets();
-  const found = all.filter(detected);
-  return found.map((t) => {
-    const via = t.readsFrom ? found.find((o) => o.agent === t.readsFrom) : undefined;
-    return { target: t, dest: skillDir(via ?? t), own: !via };
-  });
+/** The agents on this computer, each with its own copy of the skill. */
+function plan(): { target: Target; dest: string }[] {
+  return targets()
+    .filter(detected)
+    .map((t) => ({ target: t, dest: skillDir(t) }));
 }
 
 export function integrationStatus(): Integration[] {
-  const hash = skillHash();
   const byAgent = new Map(plan().map((p) => [p.target.agent, p]));
   return targets().map((t) => {
     const p = byAgent.get(t.agent);
     const file = p ? path.join(p.dest, 'SKILL.md') : null;
     const h = file ? fileHash(file) : null;
-    return { agent: t.agent, label: t.label, detected: !!p, path: h ? p!.dest : null, current: h === hash };
+    return { agent: t.agent, label: t.label, detected: !!p, path: h ? p!.dest : null, current: h === sha1(skillText(t)) };
   });
 }
 
@@ -161,7 +180,7 @@ function writeStamp(st: Stamp): void {
 
 /** Install (or refresh) the skill for every coding agent on this computer. */
 export function installIntegrations(): Integration[] {
-  for (const p of plan()) if (p.own) copySkill(p.dest);
+  for (const p of plan()) copySkill(p.target);
   const st = readStamp();
   writeStamp({ ...st, hash: skillHash(), agents: plan().map((p) => p.target.agent), uninstalled: undefined });
   return integrationStatus();
@@ -185,11 +204,9 @@ export function ensureIntegrations(): void {
   const st = readStamp();
   if (st?.uninstalled) return;
   const hash = skillHash();
-  const todo = plan().filter(
-    (p) => p.own && (!st?.agents.includes(p.target.agent) || (st.hash !== hash && fs.existsSync(path.join(p.dest, 'SKILL.md')))),
-  );
+  const todo = plan().filter((p) => !st?.agents.includes(p.target.agent) || (st.hash !== hash && fs.existsSync(path.join(p.dest, 'SKILL.md'))));
   if (st && st.hash === hash && !todo.length) return;
-  for (const p of todo) copySkill(p.dest);
+  for (const p of todo) copySkill(p.target);
   writeStamp({ ...st, hash, agents: [...new Set([...(st?.agents ?? []), ...plan().map((p) => p.target.agent)])] });
 }
 

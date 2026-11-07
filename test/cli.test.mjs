@@ -48,6 +48,12 @@ test('errors are short messages, not stack traces', () => {
   assert.doesNotMatch(bad.stderr, /\n\s+at /);
 });
 
+test('the prompt hook is silent and harmless when the service is not running', () => {
+  const r = spawnSync(process.execPath, [cli, 'hook', 'prompt'], { env, input: '{"session_id":"x"}', encoding: 'utf8', timeout: 20_000 });
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout, '');
+});
+
 test('status and doctor run on a fresh machine', () => {
   const s = sa('status');
   assert.equal(s.status, 0, s.stderr);

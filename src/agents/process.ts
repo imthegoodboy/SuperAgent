@@ -243,3 +243,21 @@ export async function runOk(name: string, args: string[], opts: Parameters<typeo
   if (r.code !== 0) throw new Error(`${name} ${args.slice(0, 3).join(' ')} failed: ${(r.stderr || r.stdout).trim().slice(0, 500)}`);
   return r.stdout;
 }
+
+/**
+ * Run a CLI in the foreground, attached to this terminal (for launching an interactive agent).
+ * Same argument handling as startProcess, so Windows `.cmd` shims are unwrapped, never a shell.
+ */
+export function runInteractive(resolved: Resolved, args: string[], cwd: string): Promise<number> {
+  let argv = [...resolved.prefix, ...args];
+  let verbatim = false;
+  if (resolved.via === 'cmd') {
+    argv = [...resolved.prefix, `"${[`"${resolved.path}"`, ...args.map(quoteForCmd)].join(' ')}"`];
+    verbatim = true;
+  }
+  return new Promise((resolve) => {
+    const child = spawn(resolved.file, argv, { cwd, stdio: 'inherit', windowsVerbatimArguments: verbatim });
+    child.on('error', () => resolve(127));
+    child.on('close', (code) => resolve(code ?? 1));
+  });
+}
