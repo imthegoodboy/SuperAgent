@@ -11,7 +11,7 @@ import fs from 'node:fs';
 const mode = process.argv[2] ?? 'worker';
 const resumeIdx = process.argv.indexOf('--resume');
 const session = resumeIdx > 0 ? process.argv[resumeIdx + 1] : crypto.randomUUID();
-const delay = Number(process.env.MOCK_DELAY_MS ?? 50);
+const delay = Number((mode === 'router' ? process.env.MOCK_ROUTER_DELAY_MS : undefined) ?? process.env.MOCK_DELAY_MS ?? 50);
 
 function out(obj: unknown): void {
   process.stdout.write(JSON.stringify(obj) + '\n');

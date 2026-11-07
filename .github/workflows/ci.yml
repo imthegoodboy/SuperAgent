@@ -29,3 +29,24 @@ jobs:
       - run: npm test
       - name: CLI smoke test
         run: node dist/cli.js --version && node dist/cli.js help
+
+  ui:
+    name: ui (chromium)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Install Playwright (not a project dependency)
+        run: npm i --no-save playwright@1 && npx playwright install --with-deps chromium
+      - name: UI smoke test and screenshots
+        run: node scripts/ui-check.mjs ui-shots
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ui-screenshots
+          path: ui-shots/
+          if-no-files-found: ignore
