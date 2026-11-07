@@ -111,6 +111,14 @@ export interface ProcHandle {
 const KEEP = 256 * 1024;
 
 export function startProcess(resolved: Resolved, opts: ProcOptions): ProcHandle {
+  // spawn() reports a missing working directory as "ENOENT" on the program itself, which is misleading.
+  if (!fs.existsSync(opts.cwd)) {
+    return {
+      pid: undefined,
+      kill: () => {},
+      done: Promise.resolve({ code: null, stdout: '', stderr: '', timedOut: false, spawnError: `working directory does not exist: ${opts.cwd}` }),
+    };
+  }
   let args = [...resolved.prefix, ...opts.args];
   let verbatim = false;
   if (resolved.via === 'cmd') {

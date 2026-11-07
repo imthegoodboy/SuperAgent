@@ -109,6 +109,13 @@ test('text from other people is fenced as data in worker prompts', async () => {
   assert.match(p, /\[from the Router\] also update docs/);
 });
 
+test('a missing working directory is reported as such', async () => {
+  const { startProcess } = await import('../dist/agents/process.js');
+  const h = startProcess({ file: process.execPath, prefix: [], via: 'plain', path: '' }, { cwd: '/definitely/not/here-xyz', args: ['-v'] });
+  const r = await h.done;
+  assert.match(r.spawnError, /working directory does not exist/);
+});
+
 test('worker report parsing', () => {
   const r = parseReport('All good.\n<superagent-report>{"status":"done","summary":"Fixed it","pr_url":"https://github.com/a/b/pull/12"}</superagent-report>');
   assert.equal(r.status, 'done');
