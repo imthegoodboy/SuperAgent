@@ -52,9 +52,9 @@ function parseEvents(input: string): Ev[] {
 async function main(): Promise<void> {
   const input = await readStdin();
   out({ type: 'system', subtype: 'init', session_id: session });
-  await new Promise((r) => setTimeout(r, delay));
 
   if (mode === 'router') {
+    await new Promise((r) => setTimeout(r, delay));
     const actions: any[] = [];
     for (const ev of parseEvents(input)) {
       if (ev.label === 'REPORT') {
