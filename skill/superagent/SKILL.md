@@ -59,19 +59,22 @@ superagent cancel W3         # stop it
 superagent retry W3          # run a failed or stopped worker again
 ```
 
-A worker with status `waiting` needs an answer: show the user its question (from `superagent tasks`
-or `superagent logs W3`) and send the reply with `superagent msg`.
+A worker with status `waiting` needs an answer: `superagent logs W3` shows its question at the end.
+Show it to the user and send their reply with `superagent msg W3 "<answer>"`.
 
 ## Repositories and GitHub
 
 ```bash
 superagent repo list
 superagent repo add .                      # the current checkout
-superagent repo add owner/name --mode all  # watch all issues and comments, not only mentions
+superagent repo add owner/name --mode all  # consider all issues and comments, not only mentions
+superagent repo add owner/name --allow alice,bob   # who may trigger it (default: only you)
 ```
 
-With a GitHub repo added, writing `/superagent` in an issue or PR comment calls the agent. Workers
-follow the PRs they open, so review comments and failing CI go straight back to them.
+With a GitHub repo added, writing `/superagent` in an issue or PR comment calls the agent. Only
+allowlisted GitHub users can trigger work, and the list starts with just the user, so add teammates
+with `--allow` when they should be able to. Workers follow the PRs they open, so review comments and
+failing CI go straight back to them.
 
 ## Rules
 
