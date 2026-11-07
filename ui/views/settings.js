@@ -209,8 +209,15 @@ export default function settingsView(el) {
             row(
               'Bot token',
               tg.botToken ? 'Saved. Paste a new token to replace it.' : null,
-              // Never prefill the masked token: typing next to it would look like an edit but be ignored.
-              text('', (v) => v && save({ telegram: { botToken: v } }, 'Token saved'), { type: 'password', placeholder: tg.botToken || '123456:ABC…', label: 'Bot token' }),
+              h(
+                'div',
+                { class: 'inline' },
+                // Never prefill the masked token: typing next to it would look like an edit but be ignored.
+                text('', (v) => v && save({ telegram: { botToken: v } }, 'Token saved'), { type: 'password', placeholder: tg.botToken || '123456:ABC…', label: 'Bot token' }),
+                tg.botToken
+                  ? h('button', { class: 'btn', type: 'button', onclick: () => save({ telegram: { botToken: '' } }, 'Token removed') }, 'Remove')
+                  : null,
+              ),
             ),
             row('Your Telegram username', 'Direct messages from these users are answered.', text(tg.allowUsers.join(', '), (v) => save({ telegram: { allowUsers: list(v) } }), { placeholder: 'username', label: 'Telegram users' })),
             h(

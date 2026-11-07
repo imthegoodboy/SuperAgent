@@ -129,6 +129,7 @@ test('config merge and repo parsing', () => {
   assert.equal(cfg.workers.defaultAgent, 'claude');
   const withToken = { ...defaultConfig(), telegram: { ...defaultConfig().telegram, botToken: 'secret1234' } };
   assert.equal(applyConfigPatch(withToken, { telegram: { botToken: '••••1234' } }).telegram.botToken, 'secret1234');
+  assert.equal(applyConfigPatch(withToken, { telegram: { botToken: '' } }).telegram.botToken, '', 'an empty token clears it');
   assert.equal(slugFromRemote('https://github.com/imthegoodboy/SuperAgent.git'), 'imthegoodboy/SuperAgent');
   assert.equal(slugFromRemote('git@github.com:a/b.git'), 'a/b');
   assert.equal(slugFromRemote('https://gitlab.com/a/b'), null);
