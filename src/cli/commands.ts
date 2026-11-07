@@ -728,7 +728,7 @@ async function uninstall(): Promise<void> {
   out({ ok: true, removed, autostart }, () => {
     for (const r of removed) console.log(`${green('✓')} Removed ${dim(r)}`);
     console.log(`${green('✓')} SuperAgent stopped and will not start at login.`);
-    console.log(dim(`  Your data is still in ${paths.home}. Remove the CLI with: npm uninstall -g @imthegoodboy/superagent`));
+    console.log(dim(`  Your data is still in ${paths.home}. Remove the CLI with: npm uninstall -g @phigon/superagent`));
   });
 }
 

@@ -62,6 +62,6 @@ agents, and `SUPERAGENT_SKIP_AUTOSTART=1` keeps it from touching start-at-login.
 2. Publish a GitHub release tagged `vX.Y.Z`.
 
 The **Publish to npm** workflow checks that the tag matches `package.json`, runs the tests, and publishes
-`@imthegoodboy/superagent` with provenance. It needs the repository secret `NPM_TOKEN` (an npm automation
+`@phigon/superagent` with provenance. It needs the repository secret `NPM_TOKEN` (an npm automation
 token). The updated skill reaches users' agents on their next `npm install -g`, or on their next
 `superagent` command.

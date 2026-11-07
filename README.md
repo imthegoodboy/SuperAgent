@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/@imthegoodboy/superagent"><img src="https://img.shields.io/npm/v/@imthegoodboy/superagent?color=5b8cff&label=npm" alt="npm"></a>
+  <a href="https://www.npmjs.com/package/@phigon/superagent"><img src="https://img.shields.io/npm/v/@phigon/superagent?color=5b8cff&label=npm" alt="npm"></a>
   <a href="https://github.com/imthegoodboy/SuperAgent/actions/workflows/ci.yml"><img src="https://github.com/imthegoodboy/SuperAgent/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-8b5cf6" alt="MIT license"></a>
 </p>
@@ -28,7 +28,7 @@ You talk to one agent; SuperAgent runs the rest.
 ## Install
 
 ```sh
-npm install -g @imthegoodboy/superagent
+npm install -g @phigon/superagent
 ```
 
 That's the only step. The install adds the `superagent` skill to every coding agent on your computer, and
@@ -186,10 +186,10 @@ Every command accepts `--json`.
 ## Update and uninstall
 
 ```sh
-npm install -g @imthegoodboy/superagent@latest && superagent restart   # update
+npm install -g @phigon/superagent@latest && superagent restart   # update
 
 superagent uninstall                         # stop it, remove the skill and start-at-login
-npm uninstall -g @imthegoodboy/superagent    # then remove the command
+npm uninstall -g @phigon/superagent    # then remove the command
 ```
 
 Your data (tasks, memory, logs) stays in `~/.superagent` until you delete it.

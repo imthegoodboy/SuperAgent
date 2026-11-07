@@ -1,7 +1,7 @@
 name: Publish to npm
 
 # Publishing a GitHub release (tag vX.Y.Z) publishes the same version to npm.
-# Needs the repository secret NPM_TOKEN: an npm automation token allowed to publish @imthegoodboy/superagent.
+# Needs the repository secret NPM_TOKEN: an npm automation token allowed to publish @phigon/superagent.
 
 on:
   release:
