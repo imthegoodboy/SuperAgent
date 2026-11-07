@@ -156,8 +156,9 @@ Every intervention is recorded and shown under Activity → Watchdog.
 SuperAgent has no UI of its own. Agents use it through:
 
 - **The skill** (`skill/superagent/SKILL.md`): when to use SuperAgent, the router loop, how to handle each
-  kind of event, how to brief a worker, and the rules. A global npm install copies it into every agent's
-  global skills folder (`scripts/postinstall.mjs`). Every CLI command checks again (`ensureIntegrations`
+  kind of event, how to brief a worker, and the rules. `superagent install` copies it into every agent's global skills folder,
+  and so does a global npm install where npm runs install scripts (`scripts/postinstall.mjs`; recent npm
+  versions skip them for global packages unless allowed). Every CLI command checks again (`ensureIntegrations`
   in `src/daemon/system.ts`), so agents installed later get it too, and an updated skill reaches the
   folders that have it. `superagent uninstall` removes it.
 - **The Claude Code hook.** Claude Code's copy of the skill declares a `UserPromptSubmit` hook in its
