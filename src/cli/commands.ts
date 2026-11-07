@@ -226,8 +226,11 @@ async function say(text: string): Promise<void> {
   await Promise.race([ready, sleep(3000)]);
   const { message } = await api('POST', '/api/messages', { text });
   sentId = message.id;
-  const timeout = sleep(240_000).then(() => 'timeout');
+  // A cleared timer, not sleep(): a pending timer would keep the process alive after the reply.
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<'timeout'>((r) => (timer = setTimeout(() => r('timeout'), 240_000)));
   const r = await Promise.race([replied, timeout]);
+  clearTimeout(timer);
   close();
   if (r === 'timeout') die('No reply within 4 minutes. Check `superagent status`.');
 }

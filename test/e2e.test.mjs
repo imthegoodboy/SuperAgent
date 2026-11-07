@@ -96,6 +96,20 @@ test('chat message is answered by the router', async () => {
   assert.equal(reply.text, 'Echo: hello there');
 });
 
+test('`superagent say` prints the reply and exits right away', async () => {
+  const started = Date.now();
+  const out = await new Promise((resolve, reject) => {
+    const p = spawn(process.execPath, [path.join(root, 'dist', 'cli.js'), 'say', 'are you there?'], {
+      env: { ...process.env, SUPERAGENT_HOME: home, NO_COLOR: '1' },
+    });
+    let text = '';
+    p.stdout.on('data', (c) => (text += c));
+    p.on('close', (code) => (code === 0 ? resolve(text) : reject(new Error(`exit ${code}: ${text}`))));
+  });
+  assert.match(out, /Echo: are you there\?/);
+  assert.ok(Date.now() - started < 30_000, `took ${Date.now() - started}ms`);
+});
+
 test('router dispatches a worker, worker reports back, router relays the result', async () => {
   const { message } = await call('POST', '/api/messages', { text: 'task: write the mock file' });
   const worker = await until(async () => (await call('GET', '/api/workers')).find((w) => w.title.includes('write the mock file')));

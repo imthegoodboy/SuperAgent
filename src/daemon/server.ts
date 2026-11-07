@@ -3,7 +3,7 @@ import http from 'node:http';
 import path from 'node:path';
 import type { App } from './app.js';
 import { publicConfig } from '../core/config.js';
-import { UI_DIR, pkgVersion } from '../core/paths.js';
+import { HOME_ID, UI_DIR, pkgVersion } from '../core/paths.js';
 import { bus, emit, ref } from '../core/util.js';
 import { autostartStatus, installSkill, openFolder, resolveRepoInput, setAutostart, skillStatus, type SkillTarget } from './system.js';
 
@@ -329,7 +329,7 @@ export function createServer(app: App): http.Server {
     const method = req.method ?? 'GET';
 
     if (url.pathname === '/api/health') {
-      return send(res, 200, { ok: true, name: 'superagent', version: pkgVersion(), pid: process.pid, uptime: Date.now() - app.startedAt });
+      return send(res, 200, { ok: true, name: 'superagent', home: HOME_ID, version: pkgVersion(), pid: process.pid, uptime: Date.now() - app.startedAt });
     }
     if (!url.pathname.startsWith('/api/')) {
       if (method !== 'GET') return send(res, 405, 'method not allowed');
