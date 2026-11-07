@@ -131,7 +131,10 @@ interface Stamp {
   hash: string;
   /** Agents we have installed the skill for at least once. */
   agents: string[];
+  /** Start at login: set once on first start, or by the person with `autostart on|off`. */
   autostart?: boolean;
+  /** `superagent uninstall` ran: install nothing until `superagent install` or a fresh npm install. */
+  uninstalled?: boolean;
 }
 
 function readStamp(): Stamp | null {
@@ -151,7 +154,15 @@ function writeStamp(st: Stamp): void {
 export function installIntegrations(): Integration[] {
   for (const p of plan()) if (p.own) copySkill(p.dest);
   const st = readStamp();
-  writeStamp({ ...st, hash: skillHash(), agents: plan().map((p) => p.target.agent) });
+  writeStamp({ ...st, hash: skillHash(), agents: plan().map((p) => p.target.agent), uninstalled: undefined });
+  return integrationStatus();
+}
+
+/** After `npm install -g`: a first install (or one after `uninstall`) installs everywhere; an upgrade refreshes. */
+export function postinstallIntegrations(): Integration[] {
+  const st = readStamp();
+  if (!st || st.uninstalled) return installIntegrations();
+  ensureIntegrations();
   return integrationStatus();
 }
 
@@ -163,6 +174,7 @@ export function installIntegrations(): Integration[] {
 export function ensureIntegrations(): void {
   if (process.env.SUPERAGENT_SKIP_INTEGRATIONS === '1' || process.env.SUPERAGENT_WORKER) return;
   const st = readStamp();
+  if (st?.uninstalled) return;
   const hash = skillHash();
   const todo = plan().filter(
     (p) => p.own && (!st?.agents.includes(p.target.agent) || (st.hash !== hash && fs.existsSync(path.join(p.dest, 'SKILL.md')))),
@@ -176,7 +188,7 @@ export function ensureIntegrations(): void {
 export async function ensureAutostartOnce(): Promise<void> {
   if (process.env.SUPERAGENT_SKIP_INTEGRATIONS === '1' || process.env.SUPERAGENT_SKIP_AUTOSTART === '1') return;
   const st = readStamp() ?? { hash: '', agents: [] };
-  if (st.autostart !== undefined) return;
+  if (st.autostart !== undefined || st.uninstalled) return;
   let on = false;
   try {
     on = await setAutostart(true);
@@ -186,23 +198,30 @@ export async function ensureAutostartOnce(): Promise<void> {
   writeStamp({ ...st, autostart: on });
 }
 
-/** Remove the skill from every agent folder we put it in. */
+/** `superagent autostart on|off`: the person's choice, which the first start must not override. */
+export async function chooseAutostart(enabled: boolean): Promise<boolean> {
+  const on = await setAutostart(enabled);
+  writeStamp({ ...(readStamp() ?? { hash: '', agents: [] }), autostart: on });
+  return on;
+}
+
+/** Remove the skill files we put in each agent's folder (and the folder, if nothing else is in it). */
 export function uninstallIntegrations(): string[] {
+  const ours = fs.readdirSync(SKILL_DIR);
   const removed: string[] = [];
   for (const t of targets()) {
     const dir = skillDir(t);
-    const file = path.join(dir, 'SKILL.md');
     try {
-      // Only ever delete our own skill.
-      if (/^name: superagent$/m.test(fs.readFileSync(file, 'utf8'))) {
-        fs.rmSync(dir, { recursive: true, force: true });
-        removed.push(dir);
-      }
+      // Only ever delete our own skill, and only the files it consists of.
+      if (!/^name: superagent$/m.test(fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf8'))) continue;
     } catch {
-      /* not installed there */
+      continue; // not installed there
     }
+    for (const f of ours) fs.rmSync(path.join(dir, f), { force: true });
+    if (!fs.readdirSync(dir).length) fs.rmdirSync(dir);
+    removed.push(dir);
   }
-  fs.rmSync(STAMP(), { force: true });
+  writeStamp({ ...(readStamp() ?? { hash: '', agents: [] }), uninstalled: true });
   return removed;
 }
 

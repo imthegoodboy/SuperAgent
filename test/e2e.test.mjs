@@ -137,6 +137,8 @@ test('actions validate input and report what they did', async () => {
   assert.ok(mem.ok && mem.memory > 0);
   const rec = await act({ type: 'recall', ids: ['W#1', 'TH#1'] });
   assert.match(rec.text, /W#1 "Write the mock file"/);
+  assert.match((await act({ type: 'dispatch', task: 'x', threads: ['TH#999'] })).error, /unknown thread TH#999/);
+  assert.match((await act({ type: 'dispatch', task: 'x', threads: ['TH#1'] })).error, /is a conversation/, 'chats cannot be followed');
   await assert.rejects(call('POST', '/api/router/actions', { actions: [{ type: 'rm -rf' }] }), /unknown action type/);
   const again = await call('POST', '/api/router/attach', {}).catch((e) => e);
   assert.equal(again.status, 409, 'a second session cannot attach without --take');
@@ -164,6 +166,34 @@ test('the lease runs out and the background router takes over by itself', async 
   } finally {
     await call('PUT', '/api/config', { router: { leaseMinutes: 15 } });
   }
+});
+
+test('events a vanished session never acted on go back to the background router', async () => {
+  await call('PUT', '/api/config', { router: { leaseMinutes: 0.02 } });
+  try {
+    await call('POST', '/api/router/attach', { take: true });
+    await call('GET', '/api/router/events');
+    // An event from outside (here: a watchdog alert) is delivered to the session, which then goes quiet.
+    await call('POST', '/api/watchdog/action', { type: 'event', level: 'info', note: 'warm-up' });
+    const d = await act({ type: 'dispatch', task: 'victim job', title: 'Victim job' });
+    await call('POST', '/api/watchdog/action', { type: 'stop_worker', worker: d.worker.slice(2), note: 'looping on a dev server' });
+    const ev = await call('GET', '/api/router/events');
+    assert.ok(ev.events.some((e) => e.source === 'watchdog'), 'the alert reached the session');
+    await until(async () => (await call('GET', '/api/router')).turns.some((t) => t.session !== 'attached agent' && /looping on a dev server/.test(t.input)), 20000);
+  } finally {
+    await call('PUT', '/api/config', { router: { leaseMinutes: 15 } });
+  }
+});
+
+test('a silent task that does not succeed is not announced', async () => {
+  await call('POST', '/api/router/attach', { take: true });
+  await call('GET', '/api/router/events');
+  const d = await act({ type: 'dispatch', task: 'ASK: speculative fix', silent: true });
+  await until(async () => (await worker(d.worker)).status === 'waiting');
+  const ev = await call('GET', '/api/router/events');
+  assert.ok(!ev.events.some((e) => e.worker === d.worker), 'no report for the attached agent');
+  const { triggers } = await call('GET', '/api/triggers?limit=20');
+  assert.ok(triggers.some((t) => t.source === 'worker' && t.decision === 'dropped' && /silent task ended needs_input/.test(t.reason)), 'kept in the activity log');
 });
 
 test('a worker in a git repo runs in its own worktree and branch', async () => {

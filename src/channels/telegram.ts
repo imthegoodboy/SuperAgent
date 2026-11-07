@@ -83,7 +83,7 @@ export class TelegramSource {
     let dropReason: string | undefined;
     if (!mode) {
       if (isPrivate && userAllowed) mode = 'all';
-      else dropReason = `unknown chat ${chatId} (${msg.chat.title ?? '@' + author}); add it to telegram.chats with \`superagent config set\``;
+      else dropReason = `unknown chat ${chatId} (${msg.chat.title ?? '@' + author}); add it with \`superagent config set telegram.chats '[{"id":"${chatId}","mode":"mentions"}]'\` (keep any chats already listed)`;
     }
     const mentioned =
       isPrivate ||

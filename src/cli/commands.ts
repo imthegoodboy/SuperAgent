@@ -9,12 +9,12 @@ import { isAlive, killTree, run } from '../agents/process.js';
 import { detectAgents } from '../agents/runner.js';
 import {
   autostartStatus,
+  chooseAutostart,
   ensureAutostartOnce,
   ensureIntegrations,
   installIntegrations,
   integrationStatus,
   resolveRepoInput,
-  setAutostart,
   uninstallIntegrations,
 } from '../daemon/system.js';
 import { STOP_FLAG, watchdogPid } from '../daemon/watchdog.js';
@@ -278,6 +278,7 @@ async function eventsCmd(v: Record<string, any>): Promise<void> {
 // ---------- workers ----------
 
 async function workers(all: boolean): Promise<void> {
+  await ensureRunning();
   const rows: any[] = await api('GET', `/api/workers${all ? '?archived=1' : ''}`);
   out(rows, () => {
     if (!rows.length) return console.log(dim('No workers yet. Start one with `superagent dispatch "<task>"`.'));
@@ -318,9 +319,10 @@ async function logs(idArg: string | undefined, follow: boolean): Promise<void> {
   if (!idArg) {
     const file = path.join(paths.logs, 'daemon.log');
     if (!fs.existsSync(file)) die('No service log yet.');
-    console.log(fs.readFileSync(file, 'utf8').trimEnd().split('\n').slice(-80).join('\n'));
-    return;
+    const lines = fs.readFileSync(file, 'utf8').trimEnd().split('\n').slice(-80);
+    return out({ file, lines }, () => console.log(lines.join('\n')));
   }
+  await ensureRunning();
   const id = workerRef(idArg).slice(2);
   const rows: any[] = await api('GET', `/api/workers/${id}/logs`);
   if (asJson && !follow) return console.log(JSON.stringify(rows, null, 2));
@@ -333,12 +335,14 @@ async function logs(idArg: string | undefined, follow: boolean): Promise<void> {
 }
 
 async function graph(v: Record<string, any>): Promise<void> {
+  await ensureRunning();
   const g = await api('GET', '/api/graph');
   if (asJson) return console.log(JSON.stringify({ router: g.router, workers: g.workers, threads: g.threads }, null, 2));
   console.log(v.mermaid ? g.mermaid : g.tree);
 }
 
 async function activity(): Promise<void> {
+  await ensureRunning();
   const r = await api('GET', '/api/triggers?limit=40');
   out(r.triggers, () => {
     if (!r.triggers.length) return console.log(dim('No events yet.'));
@@ -468,9 +472,16 @@ function printIntegrations(): void {
 }
 
 async function doctor(): Promise<void> {
-  const ok = (m: string) => console.log(`${green('✓')} ${m}`);
-  const bad = (m: string, hint?: string) => console.log(`${red('✗')} ${m}${hint ? dim(' - ' + hint) : ''}`);
-  const warn = (m: string, hint?: string) => console.log(`${yellow('!')} ${m}${hint ? dim(' - ' + hint) : ''}`);
+  const checks: { level: 'ok' | 'warn' | 'bad'; message: string; hint?: string }[] = [];
+  const add = (level: 'ok' | 'warn' | 'bad') => (message: string, hint?: string) => {
+    checks.push({ level, message, ...(hint ? { hint } : {}) });
+    if (asJson) return;
+    const mark = level === 'ok' ? green('✓') : level === 'warn' ? yellow('!') : red('✗');
+    console.log(`${mark} ${message}${hint ? dim(' - ' + hint) : ''}`);
+  };
+  const ok = add('ok');
+  const warn = add('warn');
+  const bad = add('bad');
   const [maj, min] = process.versions.node.split('.').map(Number);
   if (maj > 22 || (maj === 22 && min >= 13)) ok(`Node ${process.version}`);
   else bad(`Node ${process.version}`, 'SuperAgent needs Node 22.13 or newer');
@@ -478,7 +489,7 @@ async function doctor(): Promise<void> {
   if (git.code === 0) ok(git.stdout.trim());
   else bad('git not found', 'install Git');
   const gh = await run('gh', ['auth', 'status'], { timeoutMs: 20_000 });
-  if (gh.code === 0) ok(`GitHub CLI logged in ${dim((gh.stdout + gh.stderr).match(/account (\S+)/)?.[1] ?? '')}`);
+  if (gh.code === 0) ok(`GitHub CLI logged in ${(gh.stdout + gh.stderr).match(/account (\S+)/)?.[1] ?? ''}`.trim());
   else warn('GitHub CLI not logged in', 'run `gh auth login` to enable GitHub triggers and PRs');
   const found = await detectAgents();
   for (const a of found) {
@@ -486,8 +497,11 @@ async function doctor(): Promise<void> {
     else warn(`${a.label} not available`, a.error ?? '');
   }
   if (!found.some((a) => a.installed)) bad('No coding agent installed', `install one of: ${AGENT_IDS.join(', ')}`);
-  console.log(bold('Skill'));
-  printIntegrations();
+  const skill = integrationStatus();
+  if (!asJson) {
+    console.log(bold('Skill'));
+    printIntegrations();
+  }
   const h = await health();
   if (h) ok(`Service running (pid ${h.pid}) at ${baseUrl()}`);
   else warn('Service not running', 'router commands start it automatically');
@@ -499,6 +513,7 @@ async function doctor(): Promise<void> {
   }
   if (await autostartStatus()) ok('Starts automatically at login');
   else warn('Not starting at login', 'superagent autostart on');
+  if (asJson) console.log(JSON.stringify({ ok: !checks.some((c) => c.level === 'bad'), checks, skill }, null, 2));
 }
 
 async function uninstall(): Promise<void> {
@@ -508,7 +523,7 @@ async function uninstall(): Promise<void> {
   // The Windows Run key is per user, not per data folder; tests must never remove the real one.
   if (process.env.SUPERAGENT_SKIP_AUTOSTART !== '1') {
     try {
-      autostart = await setAutostart(false);
+      autostart = await chooseAutostart(false);
     } catch {
       /* nothing to undo */
     }
@@ -553,8 +568,8 @@ export async function main(argv: string[]): Promise<void> {
   });
   asJson = !!v.json;
   const [cmd, ...rest] = positionals;
-  if (v.version || cmd === 'version') return console.log(pkgVersion());
-  if (v.help || cmd === 'help') return console.log(HELP);
+  if (v.version || cmd === 'version') return out({ version: pkgVersion() }, () => console.log(pkgVersion()));
+  if (v.help || cmd === 'help') return out({ help: HELP.replace(/\x1b\[\d+m/g, '') }, () => console.log(HELP));
   // Installing the package is the only step a person takes; every command keeps the skill in place
   // for agents installed later. It must never get in the way of the command itself.
   if (cmd !== '__daemon' && cmd !== '__watchdog' && cmd !== 'uninstall') {
@@ -638,6 +653,7 @@ export async function main(argv: string[]): Promise<void> {
       case 'remember':
         return act({ type: 'remember', text: await textArg(rest, 'superagent remember "<fact>"') }, (r) => console.log(`${green('✓')} Remembered (#${r.memory})`));
       case 'memory': {
+        await ensureRunning();
         const rows: any[] = await api('GET', '/api/memory');
         return out(rows, () => {
           if (!rows.length) return console.log(dim('Nothing remembered yet.'));
@@ -647,11 +663,13 @@ export async function main(argv: string[]): Promise<void> {
       case 'forget': {
         const n = Number(String(rest[0] ?? '').replace(/^#/, ''));
         if (!Number.isInteger(n) || n <= 0) die('Usage: superagent forget <memory id>');
+        await ensureRunning();
         await api('DELETE', `/api/memory/${n}`);
         return out({ ok: true }, () => console.log(`${green('✓')} Forgot #${n}`));
       }
       case 'recall': {
         if (!rest.length) die('Usage: superagent recall <T#42|TH#8|W#3> […]');
+        await ensureRunning();
         const r = await api('GET', `/api/recall?ids=${encodeURIComponent(rest.join(','))}`);
         return out(r, () => console.log(r.text));
       }
@@ -664,11 +682,13 @@ export async function main(argv: string[]): Promise<void> {
         return logs(rest[0], !!v.live);
       case 'retry': {
         const w = workerRef(rest[0]);
+        await ensureRunning();
         await api('POST', `/api/workers/${w.slice(2)}/retry`);
         return out({ ok: true, worker: w }, () => console.log(`${green('✓')} Retrying ${w}`));
       }
       case 'archive': {
         const w = workerRef(rest[0]);
+        await ensureRunning();
         await api('POST', `/api/workers/${w.slice(2)}/archive`);
         return out({ ok: true, worker: w }, () => console.log(`${green('✓')} Archived ${w}`));
       }
@@ -697,7 +717,7 @@ export async function main(argv: string[]): Promise<void> {
         return uninstall();
       case 'autostart': {
         if (rest[0] === 'on' || rest[0] === 'off') {
-          const on = await setAutostart(rest[0] === 'on');
+          const on = await chooseAutostart(rest[0] === 'on');
           return out({ ok: true, autostart: on }, () => console.log(`${green('✓')} Autostart ${on ? 'on' : 'off'}`));
         }
         const on = await autostartStatus();

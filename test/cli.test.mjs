@@ -33,13 +33,13 @@ test('config and repo commands work before the daemon ever ran', () => {
 });
 
 test('errors are short messages, not stack traces', () => {
-  const r = sa('workers');
+  const r = sa('router', 'status');
   assert.equal(r.status, 1);
   assert.match(r.stderr, /not running/);
   const unknown = sa('chat');
   assert.equal(unknown.status, 1);
   assert.match(unknown.stderr, /Unknown command "chat"/);
-  const json = sa('workers', '--json');
+  const json = sa('router', 'status', '--json');
   assert.equal(json.status, 1);
   assert.equal(JSON.parse(json.stdout).ok, false, 'errors are JSON with --json');
   assert.doesNotMatch(r.stderr, /\n\s+at /, 'no stack trace');
@@ -55,4 +55,7 @@ test('status and doctor run on a fresh machine', () => {
   const d = sa('doctor');
   assert.equal(d.status, 0, d.stderr);
   assert.doesNotMatch(d.stdout, /ENOENT/);
+  const dj = JSON.parse(sa('doctor', '--json').stdout);
+  assert.ok(Array.isArray(dj.checks) && dj.checks.some((c) => /^Node /.test(c.message)), 'doctor --json is structured');
+  assert.equal(JSON.parse(sa('--version', '--json').stdout).version, JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version);
 });

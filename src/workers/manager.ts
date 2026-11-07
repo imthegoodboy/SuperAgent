@@ -333,11 +333,15 @@ export class WorkerManager {
   }
 
   private report(id: number, status: string, summary: string, pr: string | null, question: string | null, error: string | null): void {
+    const w = this.app.store.workerById(id);
     this.app.ingest.ingest({
       source: 'worker',
       kind: 'report',
       text: summary || error || '(no summary)',
       meta: { worker: id, status, pr_url: pr, question, error },
+      // Acting ahead (Section 3.4): a silent task is only news if it worked. Its other results are kept
+      // on the worker and in the activity log, but no router is asked to announce them.
+      policy: w?.silent && status !== 'done' ? { dropReason: `silent task ended ${status}` } : undefined,
     });
   }
 

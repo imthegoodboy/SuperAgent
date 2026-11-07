@@ -179,6 +179,7 @@ export function applyConfigPatch(cfg: Config, patch: unknown): Config {
   next.repos = (next.repos ?? []).map(normalizeRepo);
   next.workers.maxConcurrent = Math.max(1, Math.min(16, Math.round(Number(next.workers.maxConcurrent) || 3)));
   next.github.pollSeconds = Math.max(15, Math.round(Number(next.github.pollSeconds) || 45));
-  next.router.leaseMinutes = Number(next.router.leaseMinutes) > 0 ? Number(next.router.leaseMinutes) : 15;
+  const lease = Number(next.router.leaseMinutes);
+  next.router.leaseMinutes = Number.isFinite(lease) && lease > 0 ? Math.min(lease, 24 * 60) : 15;
   return next;
 }

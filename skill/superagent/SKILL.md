@@ -14,7 +14,8 @@ one agent the user talks to.
   sessions. Every piece of real work goes to a worker with `superagent dispatch`. This keeps you fast
   and lets many tasks run at once. You may answer from what you already know.
 - **Workers** are headless coding agents (Claude Code, Codex, OpenCode, Cursor), one task each, in their
-  own git worktree and branch. They open draft PRs and report back to you as events. They never talk to
+  own git worktree and branch (or a scratch folder when no repo is involved). In GitHub repos they open
+  draft PRs unless the user turned that off. They report back to you as events. They never talk to
   people; you do.
 - **Nothing blocks.** `dispatch` returns at once. Results arrive later in `superagent events`. Keep
   talking to the user meanwhile.
@@ -27,8 +28,9 @@ superagent router attach
 
 This starts the service if needed and makes you the router. Read what it prints: the configured repos,
 which agents can work, the user's policies, long-term memory, and what happened while no agent was
-attached (pass anything addressed to the user on to them). If it says another session is the router and
-that session is you or has ended, run `superagent router attach --take`.
+attached (pass anything addressed to the user on to them). If it says another session is the router,
+take over with `superagent router attach --take` only if that session was this one (say, before your
+context was reset) or the user confirms it has ended; otherwise tell the user which session is the router.
 
 ## The loop
 
@@ -65,11 +67,13 @@ chat), `W#n` a worker. Long text is cut (`… [+N chars: recall T#n]`); use `sup
 - **REPORT, status=needs_input** → put the worker's exact question to the user, then send the answer
   with `superagent tell W#n "…"`. If it came from GitHub, ask there with `reply`.
 - **REPORT, status=failed** → say what failed; `superagent retry W#n`, or dispatch a better-briefed worker.
-- **EXPLICIT** (someone addressed SuperAgent on GitHub or Telegram) → handle it like a user request:
-  dispatch with `--follow TH#n --reply TH#n`, and acknowledge there with `reply`.
+- **EXPLICIT** (someone addressed SuperAgent on GitHub or Telegram) → handle it like a user request and
+  acknowledge there with `reply`. From GitHub, dispatch with `--follow TH#n --reply TH#n`, so later comments
+  and CI on that issue or PR go straight to the worker. From Telegram, dispatch with `--reply TH#n` and pass
+  later messages on with `tell W#n` (chats can't be followed).
 - **CANDIDATE** (seen in a watched place, nobody asked) → act only if the user's policies say so or it is
   clearly valuable; otherwise `superagent ignore T#n`. For a likely bug, consider a silent fix:
-  `dispatch --silent` (you only hear back if it worked).
+  `dispatch --silent`. You only hear back if it worked; otherwise it stays quiet.
 - **FYI** → no action; it keeps your picture current.
 - **Watchdog alerts** → tell the user if a worker was stopped; retry if it makes sense.
 
@@ -83,7 +87,7 @@ superagent cancel W#3 [--reason "…"]
 superagent reply TH#8 "<message>"                        # GitHub issue/PR comment, Telegram message
 superagent ignore T#41 T#42 [--reason "…"]
 superagent recall T#42 TH#8 W#3                           # full objects, with the IDs they link to
-superagent follow W#3 TH#9 / superagent unfollow W#3 TH#9
+superagent follow W#3 TH#9 / superagent unfollow W#3 TH#9    # GitHub issues and PRs only
 superagent remember "<durable fact or preference>"     # memory / forget <id>
 superagent workers · superagent logs W#3 · superagent graph · superagent status · superagent activity
 superagent retry W#3 · superagent archive W#3

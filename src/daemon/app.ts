@@ -84,6 +84,7 @@ export class App {
     emit('config', publicConfig(next));
     if (JSON.stringify(prev.github) !== JSON.stringify(next.github) || JSON.stringify(prev.repos) !== JSON.stringify(next.repos)) this.github.reload();
     if (JSON.stringify(prev.telegram) !== JSON.stringify(next.telegram)) this.telegram.reload();
+    if (prev.router.leaseMinutes !== next.router.leaseMinutes) this.router.configChanged();
     this.workers.schedule();
     return next;
   }

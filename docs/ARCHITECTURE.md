@@ -40,9 +40,13 @@ state:
   and acts with CLI commands that map one-to-one onto the actions (`dispatch`, `tell`, `cancel`,
   `reply`, `ignore`, `recall`, `follow`, `remember`). The skill forbids it from doing task work itself:
   the design's own experiment found that single sessions with a subagent tool often do just that.
-  It holds a **lease** (`router.lease` in the kv table) that every router command renews. It expires
-  after `router.leaseMinutes` (15) of quiet or on `router detach`. A second session can't attach
-  while the lease is held unless it passes `--take`.
+  It holds a **lease** (`router.lease` in the kv table) that `attach`, `events` and every action renew.
+  It expires after `router.leaseMinutes` (15) of quiet or on `router detach`. A second session can't
+  attach while the lease is held unless it passes `--take`. Events are acknowledged when `events`
+  delivers them. If the lease then expires without any action on that last batch, its events from
+  people (not worker reports) go back to the queue for the background router. The lease is not tied to
+  a session identity: CLI calls carry none. After a `--take`, the old session's commands still work,
+  so the skill tells agents to take over only from a session that has ended.
 - **The background router**, used whenever no lease is held: one long-lived LLM session, resumed turn
   after turn through the agent CLI's own session mechanism (`claude -p --resume`,
   `codex exec resume`, …), answering with JSON actions only. It gets no tools: with Claude Code (the
@@ -98,7 +102,8 @@ notes, recent messages, and recent workers. `superagent router attach` prints th
 attached agent.
 
 **Acting ahead (3.4):** the router can dispatch with `silent: true`. A silent worker's result is only
-announced if it reports `done`; otherwise it's dropped quietly. The default policy uses this for
+announced if it reports `done`. Otherwise its report is dropped by the fast path in code, so neither
+router is asked to announce it. It is still on the worker and in `superagent activity`. The default policy uses this for
 "reproduce and fix reported bugs in the background".
 
 ## Full-duplex, multi-channel (Section 4)

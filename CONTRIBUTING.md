@@ -11,27 +11,35 @@ npm install        # installs TypeScript and builds dist/
 npm test
 ```
 
-Run an isolated daemon with the fake agent while you work, so nothing touches your real data:
+Run an isolated daemon with the fake agent while you work, so nothing touches your real data. First
+create the data folder with a `config.json` that uses the mock agent (`src/agents/mock-agent.ts`) and a
+spare port, then start the daemon:
 
 ```sh
 # macOS / Linux
-SUPERAGENT_HOME=/tmp/sa SUPERAGENT_MOCK=1 node dist/cli.js __daemon
-# Windows PowerShell
-$env:SUPERAGENT_HOME="$env:TEMP\sa"; $env:SUPERAGENT_MOCK="1"; node dist/cli.js __daemon
+mkdir -p /tmp/sa && echo '{"port":7979,"router":{"agent":"mock"},"workers":{"defaultAgent":"mock"}}' > /tmp/sa/config.json
+export SUPERAGENT_HOME=/tmp/sa SUPERAGENT_SKIP_INTEGRATIONS=1 SUPERAGENT_SKIP_AUTOSTART=1
+SUPERAGENT_MOCK=1 node dist/cli.js __daemon
 ```
 
-Set `"router": {"agent": "mock"}` and `"workers": {"defaultAgent": "mock"}` in that folder's
-`config.json` to drive the whole pipeline with the mock agent (`src/agents/mock-agent.ts`). Then act as
-the router yourself, with the same environment:
+```powershell
+# Windows PowerShell
+New-Item -ItemType Directory -Force "$env:TEMP\sa" | Out-Null
+'{"port":7979,"router":{"agent":"mock"},"workers":{"defaultAgent":"mock"}}' | Set-Content "$env:TEMP\sa\config.json"
+$env:SUPERAGENT_HOME="$env:TEMP\sa"; $env:SUPERAGENT_SKIP_INTEGRATIONS="1"; $env:SUPERAGENT_SKIP_AUTOSTART="1"
+$env:SUPERAGENT_MOCK="1"; node dist/cli.js __daemon
+```
+
+Then, in another terminal with the same environment variables, act as the router yourself:
 
 ```sh
-SUPERAGENT_HOME=/tmp/sa SUPERAGENT_SKIP_INTEGRATIONS=1 node dist/cli.js router attach
-SUPERAGENT_HOME=/tmp/sa SUPERAGENT_SKIP_INTEGRATIONS=1 node dist/cli.js dispatch "write a file"
-SUPERAGENT_HOME=/tmp/sa SUPERAGENT_SKIP_INTEGRATIONS=1 node dist/cli.js events --wait 30
+node dist/cli.js router attach
+node dist/cli.js dispatch "write a file"
+node dist/cli.js events --wait 30
 ```
 
 `SUPERAGENT_SKIP_INTEGRATIONS=1` keeps a development checkout from installing its skill into your real
-agents.
+agents, and `SUPERAGENT_SKIP_AUTOSTART=1` keeps it from touching start-at-login.
 
 ## Pull requests
 

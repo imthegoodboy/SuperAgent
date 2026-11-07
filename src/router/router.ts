@@ -178,7 +178,18 @@ export class Router {
     const raw = tryJson<{ since: number; renewedAt: number }>(this.app.store.getKv('router.lease') ?? '');
     if (!raw?.renewedAt) return null;
     const expiresAt = raw.renewedAt + this.app.config.router.leaseMinutes * 60_000;
-    return Date.now() < expiresAt ? { since: raw.since, renewedAt: raw.renewedAt, expiresAt } : null;
+    if (Date.now() < expiresAt) return { since: raw.since, renewedAt: raw.renewedAt, expiresAt };
+    this.expire();
+    return null;
+  }
+
+  /** The lease ran out without a detach (the session probably ended): the background router takes over. */
+  private expire(): void {
+    this.app.store.setKv('router.lease', null);
+    log('router: the attached agent went quiet; the background router takes over');
+    this.requeueUnhandled();
+    this.emitStatus();
+    setImmediate(() => this.kick());
   }
 
   /** Keep (or take) the router role for the attached agent. Returns true if it was not attached before. */
@@ -199,11 +210,8 @@ export class Router {
     if (this.leaseTimer) clearTimeout(this.leaseTimer);
     this.leaseTimer = setTimeout(() => {
       this.leaseTimer = null;
-      const lease = this.lease();
-      if (lease) return this.armLeaseTimer(lease.expiresAt);
-      log('router: the attached agent went quiet; the background router takes over');
-      this.emitStatus();
-      this.kick();
+      const lease = this.lease(); // expires it if its time is up
+      if (lease) this.armLeaseTimer(lease.expiresAt);
     }, Math.max(0, expiresAt - Date.now()) + 50);
     this.leaseTimer.unref();
   }
@@ -320,6 +328,7 @@ export class Router {
     const { store } = this.app;
     this.renew();
     await this.app.agentsReady;
+    await this.whenIdle(); // never act alongside a background turn that was already running
     const batch = (tryJson<number[]>(store.getKv('router.ext.batch') ?? '[]') ?? [])
       .map((id) => store.triggerById(id))
       .filter((t): t is TriggerRow => !!t);
@@ -344,7 +353,36 @@ export class Router {
     }
     store.updateTurn(turnId, { actions: JSON.stringify([...turnActions(turn?.actions ?? null), ...actions]) });
     emit('router_turn', store.get('SELECT * FROM router_turns WHERE id = ?', turnId));
+    // What this session did itself (replies, "Started W#n") is not news when it attaches again.
+    store.setKv('router.ext.seenAt', String(Date.now()));
     return results;
+  }
+
+  /**
+   * The lease ran out without a detach: the session probably ended. If it never acted on the last
+   * batch it was given, the events from people (not worker reports, which stay visible on the workers)
+   * go back to the queue so the background router handles them instead of losing them.
+   */
+  private requeueUnhandled(): void {
+    const { store } = this.app;
+    const turnId = Number(store.getKv('router.ext.turn') ?? 0);
+    const turn = turnId ? store.get<{ actions: string | null; session: string | null }>('SELECT actions, session FROM router_turns WHERE id = ?', turnId) : undefined;
+    if (!turn || turn.session !== 'attached agent' || turnActions(turn.actions).length) return;
+    const back = store.all<TriggerRow>("SELECT * FROM triggers WHERE router_turn_id = ? AND status = 'handled' AND source != 'worker'", turnId);
+    for (const t of back) {
+      store.updateTrigger(t.id, { status: 'pending', router_turn_id: null });
+      emit('trigger', store.triggerById(t.id));
+    }
+    store.setKv('router.ext.turn', null);
+    store.setKv('router.ext.batch', null);
+    if (back.length) log(`router: ${back.length} event(s) the attached agent never acted on go to the background router`);
+  }
+
+  /** The lease length may have changed: re-arm the takeover timer for it. */
+  configChanged(): void {
+    const lease = this.lease();
+    if (lease) this.armLeaseTimer(lease.expiresAt);
+    else this.kick();
   }
 
   // ---------- background router ----------
@@ -519,9 +557,19 @@ export class Router {
       case 'dispatch': {
         const task = String(a.task ?? '').trim();
         if (!task) throw new Error('dispatch needs a task');
-        const threads = (Array.isArray(a.threads) ? a.threads : [])
-          .map((t: unknown) => parseRefOf('TH', t))
-          .filter((n: number | null): n is number => !!n && !!store.threadById(n));
+        const requestedThreads: unknown[] = Array.isArray(a.threads) ? a.threads : [];
+        if (by === 'agent') {
+          // An attached agent gets told what is wrong instead of a worker that silently follows nothing.
+          for (const t of requestedThreads) {
+            const th = store.threadById(parseRefOf('TH', t) ?? 0);
+            if (!th) throw new Error(`unknown thread ${t}`);
+            if (!th.subscribable) throw new Error(`${ref.TH(th.id)} is a conversation, not a GitHub thread; relay its messages with \`tell\` instead`);
+          }
+          if (a.repo && !this.app.findRepo(a.repo)) {
+            throw new Error(`unknown repo "${a.repo}". Configured: ${this.app.config.repos.map((r) => r.name).join(', ') || 'none'}`);
+          }
+        }
+        const threads = requestedThreads.map((t) => parseRefOf('TH', t)).filter((n): n is number => !!n && !!store.threadById(n));
         let replyThread = parseRefOf('TH', a.reply_thread);
         if (replyThread && !store.threadById(replyThread)) {
           if (by === 'agent') throw new Error(`unknown reply thread ${a.reply_thread}`);
@@ -540,9 +588,6 @@ export class Router {
             repo = slug ? this.app.findRepo(slug) : undefined;
             if (repo) break;
           }
-        }
-        if (by === 'agent' && a.repo && !repo) {
-          throw new Error(`unknown repo "${a.repo}". Configured: ${this.app.config.repos.map((r) => r.name).join(', ') || 'none'}`);
         }
         const requested = String(a.agent ?? '').toLowerCase();
         if (by === 'agent' && requested && !this.app.availableAgents().includes(requested as AgentId)) {

@@ -68,32 +68,46 @@ test('the first command installs the skill for every agent found, and uninstall 
 
     // Someone removes it on purpose: it stays removed until they ask for it again.
     fs.rmSync(path.dirname(skillAt(home, '.codex')), { recursive: true });
-    sa('config');
+    assert.equal(sa('config').status, 0);
     assert.ok(!fs.existsSync(skillAt(home, '.codex')));
     const install = sa('install');
     assert.equal(install.status, 0, install.stderr);
     assert.ok(fs.existsSync(skillAt(home, '.codex')));
     assert.match(install.stdout, /Claude Code/);
 
+    const notes = path.join(path.dirname(skillAt(home, '.cursor')), 'my-notes.md');
+    fs.writeFileSync(notes, 'mine');
     const un = sa('uninstall');
     assert.equal(un.status, 0, un.stderr);
     for (const dir of ['.claude', '.codex', '.cursor']) assert.ok(!fs.existsSync(skillAt(home, dir)), `removed from ${dir}`);
     assert.ok(fs.existsSync(path.join(home, '.claude')), "the agent's own folder stays");
+    assert.equal(fs.readFileSync(notes, 'utf8'), 'mine', 'files that are not ours stay');
+    assert.equal(sa('config').status, 0);
+    assert.ok(!fs.existsSync(skillAt(home, '.claude')), 'after uninstall, commands no longer reinstall the skill');
   } finally {
     fs.rmSync(home, { recursive: true, force: true, maxRetries: 3 });
   }
 });
 
-test('postinstall only installs for global npm installs', () => {
-  const { home, env } = fakeHome();
+test('postinstall only installs for global npm installs, and upgrades respect a removed skill', () => {
+  const { home, env, sa } = fakeHome();
   try {
     fs.mkdirSync(path.join(home, '.claude'));
+    fs.mkdirSync(path.join(home, '.codex'));
     const post = (extra) => spawnSync(process.execPath, [path.join(root, 'scripts', 'postinstall.mjs')], { env: { ...env, ...extra }, encoding: 'utf8' });
     assert.equal(post({ npm_config_global: '' }).status, 0);
     assert.ok(!fs.existsSync(skillAt(home, '.claude')), 'local installs (development, CI) are left alone');
     const r = post({ npm_config_global: 'true' });
     assert.equal(r.status, 0, r.stderr);
     assert.ok(fs.existsSync(skillAt(home, '.claude')));
+    // The person removes it from Codex; an upgrade (same stamp, new install) leaves it removed.
+    fs.rmSync(path.dirname(skillAt(home, '.codex')), { recursive: true });
+    post({ npm_config_global: 'true' });
+    assert.ok(!fs.existsSync(skillAt(home, '.codex')), 'a skill removed on purpose stays removed');
+    // After `superagent uninstall`, installing the package again installs everywhere.
+    sa('uninstall');
+    post({ npm_config_global: 'true' });
+    assert.ok(fs.existsSync(skillAt(home, '.claude')) && fs.existsSync(skillAt(home, '.codex')), 'a fresh install after uninstall');
   } finally {
     fs.rmSync(home, { recursive: true, force: true, maxRetries: 3 });
   }

@@ -142,6 +142,20 @@ test('config merge and repo parsing', () => {
   assert.equal(slugFromRemote('https://gitlab.com/a/b'), null);
 });
 
+test('lease length must be a finite number of minutes', () => {
+  const lease = (v) => applyConfigPatch(defaultConfig(), { router: { leaseMinutes: v } }).router.leaseMinutes;
+  assert.equal(lease(5), 5);
+  assert.equal(lease(Infinity), 15);
+  assert.equal(lease(-1), 15);
+  assert.equal(lease('soon'), 15);
+  assert.equal(lease(1e9), 1440);
+});
+
+test('silent workers that do not succeed are filtered in code', () => {
+  assert.equal(decide({ source: 'worker', kind: 'report', text: 'x', dropReason: 'silent task ended failed' }, 0).decision, 'dropped');
+  assert.equal(decide({ source: 'worker', kind: 'report', text: 'x' }, 0).decision, 'explicit');
+});
+
 test('graph renders as a tree and as mermaid', async () => {
   const { renderGraphTree, renderGraphMermaid } = await import('../dist/router/render.js');
   const g = {

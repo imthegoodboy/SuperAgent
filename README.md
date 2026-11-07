@@ -95,7 +95,8 @@ The install copies the skill into each agent's global skills folder:
 | Cursor | `~/.cursor/skills/superagent` |
 
 If your package manager skips install scripts (`--ignore-scripts`, pnpm), the first `superagent` command
-installs the skill instead. Agents you install later get it the same way. The background service starts
+other than `help` or `--version` installs the skill instead. Agents you install later get it the same way, and a skill you delete from one agent on purpose stays
+deleted. The background service starts
 the first time your agent uses it, and from then on it starts when you log in. `superagent doctor` checks
 everything.
 
@@ -130,10 +131,11 @@ Every command accepts `--json`. Run `superagent help` for the rest.
 
 ### When your session ends
 
-A session stays the router while it uses `superagent` commands. After 15 quiet minutes
+A session stays the router while it reads events and acts. After 15 quiet minutes
 (`router.leaseMinutes`), or after `superagent router detach`, the background router takes over:
-it replies on GitHub and Telegram and passes follow-ups to the right workers. The next agent that
-attaches gets a "while you were away" summary.
+it replies on GitHub and Telegram and passes follow-ups to the right workers. If the session went
+quiet without acting on the last events it was given, those events go to the background router
+instead of being lost. The next agent that attaches gets a "while you were away" summary.
 
 ### Telegram (optional)
 
