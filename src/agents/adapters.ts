@@ -47,6 +47,11 @@ export interface AgentAdapter {
   routerArgs(spec: RouterSpec): string[];
   parser(): (line: string) => AgentEvent[];
   resolve?(): Resolved | null;
+  /**
+   * The agent's sandbox can only write inside its workspace, so a git worktree (whose index lives in the
+   * main repo's .git) can't commit. Such workers get a self-contained clone instead.
+   */
+  needsOwnGitDir?(autonomy: 'full' | 'safe'): boolean;
 }
 
 function toolSummary(name: string, input: any): string {
@@ -131,6 +136,8 @@ export const codex: AgentAdapter = {
   command: 'codex',
   promptVia: 'stdin',
   supportsSystem: false,
+  // Codex's sandbox (seen on Windows) refuses writes outside the workspace, even to --add-dir folders.
+  needsOwnGitDir: (autonomy) => autonomy === 'safe',
   workerArgs(s) {
     const sandbox =
       s.autonomy === 'full'
